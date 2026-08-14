@@ -23,24 +23,36 @@ hackathon/
 ├── metabase/
 │   └── docker-compose.yml        # the gym: postgres (app DB) + metabase
 ├── agent/
-│   ├── .venv/                    # python 3.12 env (NOT system 3.9)
-│   ├── computer-use-preview/     # vendored google-gemini reference clone
-│   ├── verify_gemini.py          # Step 6: key live + scoped for computer use
-│   ├── verify_harness.py         # Step 7: browser sees the gym
-│   └── artifacts/
-│       └── step7_login_page.png  # captured proof the login page renders
+│   ├── .venv/                    # python 3.12 env (NOT system 3.9) — runs everything
+│   ├── computer-use-preview/     # vendored google-gemini reference clone (git-ignored)
+│   ├── storage_state.json        # auth cookie — git-ignored, treat as a secret
+│   ├── verify_gemini.py          # Phase 2: key live + scoped for computer use
+│   └── verify_harness.py         # Phase 2: browser sees the gym
+├── rlgym/                        # the rollout pipeline
+│   ├── schemas.py                # artifact models + status→reward contract
+│   ├── tasks.py                  # tasks.json loader
+│   ├── computer.py               # GymComputer: pre-auth, video, domain lock
+│   ├── capture_auth.py           # mints storage_state.json
+│   ├── agents/base.py            # Agent protocol (agent-agnostic seam)
+│   ├── agents/gemini_cu.py       # Gemini computer-use + submit_answer
+│   ├── executor.py               # ONE attempt in a subprocess → artifact
+│   ├── grader.py                 # versioned reward function
+│   └── run_one.py                # demo / debug CLI
+├── tests/                        # 44 tests (grader is pure; computer needs the gym)
+├── runs/                         # rollout artifacts — git-ignored
 ├── resources/
 │   ├── metabase_envdata.sql      # binary PGDMP dump — THE seed data (never edit)
 │   ├── readable_metabase_envdata.sql  # plain-SQL twin, inspection only (never edit)
-│   └── tasks.json                # out of scope
-├── .env                          # GEMINI_API_KEY — git-ignored, never commit
+│   └── tasks.json                # 10 tasks: prompt + expected answer
+├── .env                          # secrets — git-ignored, never commit
 ├── .gitignore
-├── PROGRESS.md                   # step-by-step status log (Phase 1 + Phase 2)
+├── DESIGN.md                     # architecture + decisions (start here)
+├── PROGRESS.md                   # chronological log, Phases 1–3
 └── INFRA_KNOWLEDGEBASE.md        # this file
 ```
 
-**Phase status:** Phase 1 (gym) complete · Phase 2 (agent setup) complete ·
-agent loop **not wired**.
+**Status:** gym ✅ · agent toolchain ✅ · single attempt + grading ✅ (`problem10` passes
+end to end) · T×K job runner and UI ⬜ not built.
 
 ---
 
@@ -371,7 +383,7 @@ scheduler triggers mid-state. Not a failure signal.
 
 ---
 
-## 7. Computer-use agent 🟡 PIECES VERIFIED, LOOP NOT WIRED
+## 7. Computer-use agent ✅ WIRED AND PASSING
 
 **Locked decision: visual only.** The agent interacts with Metabase exclusively through
 screenshots and synthetic mouse/keyboard actions. No REST API calls, no direct DB queries, no
@@ -635,8 +647,11 @@ until [ "$(docker inspect -f '{{.State.Health.Status}}' mb-app)" = "healthy" ]; 
 
 ## 12. computer-use-preview internals ✅ (read-only study, Phase 2 Step 5)
 
-Reference clone at `agent/computer-use-preview/` (`--depth 1`, Apache-2.0). **No agent loop
-has been wired yet** — this section is understanding only, gathered by reading the source.
+Reference clone at `agent/computer-use-preview/` (`--depth 1`, Apache-2.0). Written as a
+read-only study before any code existed, and kept because it documents *why* our loop departs
+from upstream's. §12.6 in particular is the list of defects `rlgym/agents/gemini_cu.py` exists
+to avoid — we reuse upstream's `Computer` implementations and `handle_action()` mapping, and
+replace its `agent_loop()`.
 
 ### 12.1 The action loop
 

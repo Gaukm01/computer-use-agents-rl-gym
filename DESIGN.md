@@ -21,13 +21,21 @@ Three parts, built in order:
 | Part | What it is | Status |
 |---|---|---|
 | **Gym** | Metabase + a realistic seeded environment (dashboards, questions, users) | ✅ done |
-| **Agent** | Gemini computer-use driving a real browser against the gym | 🟡 pieces verified, loop not wired |
-| **Rollout infra** | Task definitions, resets, grading, running many attempts | ⬜ not started |
+| **Agent** | Gemini computer-use driving a real browser against the gym | ✅ done — `problem10` passes end to end |
+| **Rollout infra** | Task definitions, resets, grading, running many attempts | 🟡 one attempt + grading done; T×K runner and UI not built |
 
 **The one hard constraint: visual only.** The agent sees screenshots and emits clicks and
 keystrokes. No REST API calls, no SQL, no DOM inspection. If something looks easier via API,
 that's a signal to flag it, not to take the shortcut — an API path would measure the wrong
 thing entirely.
+
+To be precise about where that line falls, since the harness does touch the DOM in two
+places: **the agent** perceives the page only through screenshots. **The harness** reads the
+DOM twice, never feeding either result to the model — a pre-flight check that we aren't
+sitting on `/auth/login` (so a stale cookie is reported as infrastructure failure rather than
+agent failure), and telemetry noting whether the SQL editor appeared (so pass rates can be
+split by strategy). Grading likewise queries Postgres directly, because the scorer is not the
+policy.
 
 ---
 
@@ -285,12 +293,19 @@ Then open http://localhost:3000 → log in as `daksh@deeptune.com` / `Daksh@123`
 | Goal | Command |
 |---|---|
 | Is the gym up? | `docker compose ps` · `curl -s localhost:3000/api/health` |
+| Mint the auth cookie (once) | `agent/.venv/bin/python -m rlgym.capture_auth` |
+| **Run one attempt** | `agent/.venv/bin/python -m rlgym.run_one --task problem10` |
+| Watch it work | `... -m rlgym.run_one --task problem1 --headed` |
+| Fast plumbing check (1 API call) | `... -m rlgym.run_one --task problem10 --max-steps 1` |
+| Run the tests | `agent/.venv/bin/python -m pytest tests/ -q` |
 | Is my API key good? | `cd agent && ./.venv/bin/python verify_gemini.py` |
-| Can the browser see the gym? | `cd agent && PLAYWRIGHT_HEADLESS=1 ./.venv/bin/python verify_harness.py` |
 | Inspect the seeded data | `psql -h localhost -p 5433 -U postgres -d metabase_app` |
-| Run the agent (gated) | `cd agent/computer-use-preview && ../.venv/bin/python main.py --query "…" --env playwright --initial_url "http://localhost:3000" --highlight_mouse` |
 
-`--highlight_mouse` draws a red circle at each click — worth it when watching a run.
+Exit code is `1` only for `ERRORED`. A wrong answer is a valid outcome and must not look like
+a broken pipeline to a caller or CI step.
+
+The Phase 2 scripts (`verify_gemini.py`, `verify_harness.py`) still work and remain useful for
+isolating "is the key live?" from "is the gym reachable?" when something breaks.
 
 ---
 
