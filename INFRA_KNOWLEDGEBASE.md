@@ -610,9 +610,9 @@ fake now.
 
 ### 7.12 Still unwired ⬜
 
-- **Job runner**: T×K attempts in parallel with resume. `execute_attempt()` is already the
-  atomic unit it will call, so this adds orchestration only.
-- **FastAPI + React UI**: submit jobs, browse transcripts. UI design deferred by agreement.
+- **HTTP API**: FastAPI routes over `service.py` (§7.11). Pure wiring — the service layer
+  already returns pydantic models, so routes are little more than serialization.
+- **React + TS frontend**: submit jobs, browse transcripts. UI design deferred by agreement.
 - **Reset between rollouts**: `TEMPLATE` approach decided (§8.2) but not implemented —
   genuinely unnecessary today because all 10 tasks are read-only.
 - **Milestone 3 write-up**: productionization design.

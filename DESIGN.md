@@ -116,8 +116,8 @@ the dashboards query the sample dataset that ships in the image.
 ## 3b. The rollout pipeline — decisions made while building it
 
 Each layer is the atomic unit for the one above. **Nothing is rewritten between
-milestones** — the job runner will call the same `execute_attempt()` that `run_one` calls,
-and the API will call the runner.
+milestones** — the orchestrator calls the same `execute_attempt()` that `run_one` calls, and
+the API will call the orchestrator through `service.py`.
 
 ```
                     ┌──────────────────────────────────────────────┐
