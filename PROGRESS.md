@@ -470,6 +470,112 @@ No agent loop has been wired — that awaits your explicit go-ahead.
       `function_call` rather than text, which is the expected shape for a computer-use model.
       Fixed the script to declare the tool on every probe; all 5 models are reachable.
 
+---
+
+# Phase 3: Rollout Pipeline — Milestone 1
+
+## Status: ✅ Milestone 1 complete — one attempt runs, is recorded, and is graded
+
+`problem10` runs end to end and grades **COMPLETED_CORRECT / reward 1**, driven entirely
+visually. 44 tests pass. Stopping here for your review before the job runner and UI.
+
+### What was built
+
+| File | Role |
+|---|---|
+| `rlgym/schemas.py` | Artifact models + the status→reward contract |
+| `rlgym/tasks.py` | `tasks.json` loader (answers are double-encoded JSON strings) |
+| `rlgym/computer.py` | `GymComputer`: pre-auth, video, domain lock, telemetry |
+| `rlgym/capture_auth.py` | Mints `storage_state.json` once |
+| `rlgym/agents/base.py` | `Agent` protocol — the agent-agnostic seam |
+| `rlgym/agents/gemini_cu.py` | Gemini computer-use policy + `submit_answer` |
+| `rlgym/executor.py` | One attempt in a subprocess → `AttemptArtifact` |
+| `rlgym/grader.py` | Versioned reward function |
+| `rlgym/run_one.py` | Demo / debug CLI |
+| `tests/` | 44 tests |
+
+### Verified behaviours (real output, not assumed)
+
+```
+problem10, 40 steps          -> COMPLETED_CORRECT  reward 1     verdict pass
+  expected {'avg_rating': 3.15}   actual {'avg_rating': 3.15}
+  39 steps, 273s, 518k tokens, used_sql_editor=True
+
+invalid GEMINI_API_KEY       -> ERRORED            reward null  not_graded
+  carries the real 401 UNAUTHENTICATED
+
+expired session cookie       -> ERRORED            reward null  not_graded
+  "not authenticated after injecting storage_state ... re-run capture_auth"
+
+--max-steps 1                -> MAX_STEPS_EXCEEDED reward 0
+```
+
+The middle two matter most: under upstream's loop both would have been reported as
+`COMPLETE` and graded **reward 0**, silently mislabelling infra failures as agent failures.
+
+### The most interesting finding: budget blindness
+
+The first full `problem10` run **failed at 40/40 steps** — and the diagnosis was worth more
+than the pass that followed. The agent had the correct value on screen at **step 12**:
+
+> `SELECT AVG("RATING") FROM "PUBLIC"."PRODUCTS" WHERE "CATEGORY" = 'Widget'` → **3.15**
+
+It then spent 28 steps in a verification spiral. From its own reasoning at step 13:
+
+> *"the initial calculation gave me 3.15. But I can't just leave it at that, not without due
+> diligence... I need to be absolutely certain."*
+
+and at step 19, having computed `SUM=170.3, COUNT=54`:
+
+> *"170.3 / 54 gives me 3.1537037... I need to cross-reference my manual calculation with
+> what Metabase itself is displaying."*
+
+It could not decide whether Metabase's `3.15` was rounded or exact, and never submitted.
+**Either value would have graded pass** — the grader's `abs_tol=1e-2` covers the 0.0037 gap.
+The only failure was not submitting, because the agent had no way to observe its budget
+draining.
+
+Fix: observations now carry `steps_remaining`, plus an explicit submit instruction in the
+final 8 steps. The same task then passed. Standard practice in agent harnesses, and clearly
+the right call — the model was being asked to manage a resource it couldn't see.
+
+**Side benefit:** this incidentally confirms `tasks.json`'s ground truth is valid in our
+image for `problem10` — the gym really does produce 3.15. That was the risk we agreed to stop
+worrying about, and at least one data point says it's fine.
+
+### One design correction found by a test
+
+`search` was initially repointed at the gym URL, making it a silent redirect home. A test
+caught it. The documented design is *refusal*, so the code changed rather than the test:
+`search` keeps its off-origin target and the domain lock refuses it, giving the agent an
+observable boundary instead of a search that appears to return nothing.
+
+### How to test it yourself
+
+```bash
+colima start
+cd metabase && docker compose up -d && cd ..
+until [ "$(docker inspect -f '{{.State.Health.Status}}' mb-app)" = "healthy" ]; do sleep 3; done
+
+agent/.venv/bin/python -m rlgym.capture_auth        # once
+agent/.venv/bin/python -m pytest tests/ -q          # 44 passed
+
+agent/.venv/bin/python -m rlgym.run_one --task problem10            # ~4-5 min, expect pass
+agent/.venv/bin/python -m rlgym.run_one --task problem1 --headed    # watch it work
+```
+
+Artifacts land in `runs/adhoc/<attempt_id>/` — `artifact.json`, `evaluation.json`,
+`steps/*.png`, `video/*.webm`, `worker.log`.
+
+### Not built yet
+
+Job runner (T×K, parallel, resumable), FastAPI + React UI, reset-between-rollouts
+(unnecessary today — all 10 tasks are read-only), and the Milestone 3 write-up.
+
+---
+
+# Phase 2 addendum
+
 ## Step 8 — Design decisions ✅ SIGNED OFF (documented, deliberately not built)
 
 All three answered by you. Recorded here as the contract for the wiring phase. Per the

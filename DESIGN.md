@@ -105,6 +105,113 @@ the dashboards query the sample dataset that ships in the image.
 
 ---
 
+## 3b. The rollout pipeline — decisions made while building it
+
+Each layer is the atomic unit for the one above. **Nothing is rewritten between
+milestones** — the job runner will call the same `execute_attempt()` that `run_one` calls,
+and the API will call the runner.
+
+```
+tasks.json ─► Task
+                │
+                ▼
+        execute_attempt()            ONE attempt, in its own subprocess
+                │                    ├─ GymComputer   pre-auth, video, domain lock
+                │                    └─ Agent         Gemini computer-use + submit_answer
+                ▼
+        AttemptArtifact              status, steps, screenshots, video, tokens
+                │
+                ▼
+        grade()  ─► EvaluationResult verdict + reward + diff  (versioned, re-runnable)
+```
+
+### Reward derives from status, and `ERRORED` is not zero
+
+```
+COMPLETED_CORRECT     reward 1
+COMPLETED_INCORRECT   reward 0     includes "stopped without submitting"
+MAX_STEPS_EXCEEDED    reward 0     agent failure: had budget, didn't finish
+TIMED_OUT             reward 0
+ERRORED               reward null  outcome never observed -- excluded from pass@k
+```
+
+The asymmetry is the whole point. `ERRORED` means a Gemini 5xx, a browser crash, or an
+expired session — *we* failed, not the agent. Scoring it 0 would make reward correlate with
+infrastructure flakiness and quietly bias any dataset built from these artifacts. Verified:
+an invalid API key yields `ERRORED / reward null / not_graded`, carrying the real 401.
+
+Per your call, `ERRORED` attempts are **not retried** — transient 429s are already absorbed
+by the SDK's internal backoff below the attempt boundary, and k attempts provide the
+redundancy. The runner will report `passed / failed / errored` per task and flag any task
+where `valid < k` so a pass@3 computed on n=1 can't look clean.
+
+### The agent submits through a tool, not through prose
+
+`submit_answer(answer_json)` is registered alongside the computer-use tools; calling it ends
+the episode. Every task wants a structured dict, and upstream's episode ends when the model
+merely stops emitting calls — which would mean grading parsed prose. This also makes
+termination explicit rather than inferred. It doesn't weaken visual-only: the tool is the
+agent's mouth, not its eyes.
+
+### One subprocess per attempt — required, not stylistic
+
+Playwright's **sync API is not thread-safe** (multiple `sync_playwright()` instances across
+threads fail), so threads can't provide parallelism. A subprocess also makes a wall clock
+enforceable against a genuinely hung process, and contains a crashing browser to one
+attempt. The agent additionally honours a *soft* deadline so it can exit cleanly and flush
+its video; the SIGKILL is only a backstop. The artifact is rewritten after every step, so a
+killed attempt keeps its partial trajectory.
+
+### The agent is told its remaining budget
+
+Added because of an observed failure, not invented. On the first full `problem10` run the
+agent had the correct value (`3.15`) on screen at **step 12**, then spent the remaining 28
+steps re-running queries trying to decide whether Metabase's display was rounded or exact,
+and hit the cap without ever submitting. It had no way to see its budget draining.
+Observations now carry `steps_remaining`, plus an explicit submit instruction in the last 8
+steps. The same task then passed. Reporting remaining budget is standard in agent harnesses —
+without it the model is asked to manage a resource it cannot observe.
+
+### Environment boundary vs action restrictions — two different things
+
+- **Domain lock** (invariant): top-level navigation is confined to the Metabase origin;
+  sub-resource loads from other hosts are untouched. `search` **stays in the tool set** and
+  is refused, rather than being repointed at the gym — an observable boundary beats a silent
+  redirect that looks like a search returning nothing.
+- **`prohibited_actions`** (per-run config, **empty by default**): nothing is blocked today.
+  The agent may use the SQL editor or the query builder, its choice; which one it used is
+  *logged* so pass rates can be split by strategy later.
+
+### Pre-authentication
+
+Attempts start authenticated by injecting a saved Playwright `storage_state`. The password
+never enters model context or a transcript, no attempt burns 3–5 steps on a login form, and
+a login failure can't be confounded with an analysis failure. A stale cookie is caught by a
+pre-flight check and reported as `ERRORED` — infrastructure, not agent.
+
+⚠️ Metabase sessions live in `core_session` in the app DB, so **any DB restore invalidates
+the cookie**. Harmless now (read-only tasks, no resets); in write-mode it must be re-captured
+after each restore. Don't bake a session row into the pristine template — Metabase ages
+sessions out (~14 days) and a baked one rots silently.
+
+### Grader comparison rules
+
+Numbers compare with tolerance after stripping `,` `$` `%` (so `"101,203.30" == 101203.3`
+and `5 == 5.0`). Strings are whitespace-collapsed and casefolded. Key sets must match
+exactly. Lists compare as **multisets**, since `problem9` is a set of names where order
+carries no meaning.
+
+The subtle one is **pairing**: `problem1` and `problem2` return parallel arrays, so
+equal-length lists are zipped into tuples before comparison. Comparing them independently
+would accept an answer with all the right titles and all the right ratings paired *wrongly*.
+Zipping also preserves `problem2`'s ranking implicitly, since each count travels with its
+title.
+
+Near-misses (structurally right, just outside tolerance — e.g. `"Q4 2025"` for `"Q4"`) are
+flagged for review rather than trusted as clean agent failures.
+
+---
+
 ## 4. Open questions — where your input actually matters
 
 These are unresolved and shape the build. Nothing here is decided.
@@ -212,9 +319,19 @@ Then open http://localhost:3000 → log in as `daksh@deeptune.com` / `Daksh@123`
 ✅ Python env   3.12 venv, google-genai 2.8.0, playwright 1.55.0, chromium 140
 ✅ API key      live, all 5 computer-use models reachable
 ✅ Harness      renders the gym at 1440x900 PNG (screenshot reviewed)
-🟡 Agent loop   upstream main.py runs; not wired into anything of ours
-⬜ Tasks        tasks.json untouched and unscoped
-⬜ Grading      no success criteria defined
-⬜ Reset        TEMPLATE approach decided, not implemented
-⬜ Runner       no orchestration, no parallelism, no logging
+✅ Pre-auth     storage_state injection; attempts start logged in
+✅ Agent loop   our own -- step cap, no input() hang, API errors surfaced
+✅ submit_answer  explicit answer channel, terminates the episode
+✅ Executor     subprocess per attempt, soft deadline + SIGKILL backstop
+✅ Grader       pairing-aware, versioned, 44 tests passing
+✅ End-to-end   problem10 -> COMPLETED_CORRECT, reward 1, fully visual
+⬜ Runner       no T×K orchestration or parallelism yet
+⬜ API + UI     FastAPI + React planned; UI design deferred
+⬜ Reset        TEMPLATE approach decided, not implemented (unneeded: read-only tasks)
+⬜ M3           productionization design not written
 ```
+
+**Measured cost per attempt** (problem10, 39 steps): ~518k tokens, ~4.5 min wall clock.
+Prompt tokens dominate at ~13k/step — three 1440×900 screenshots in context. That number is
+the main lever if cost becomes a constraint: fewer retained screenshots, or a smaller
+viewport.

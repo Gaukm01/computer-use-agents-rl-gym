@@ -449,16 +449,93 @@ cd /Users/gkumar/assessments/hackathon/agent/computer-use-preview
 - `--model` defaults to `gemini-3.6-flash`; see §12.2 for which action set that selects.
 - With no reset flow built yet, keep demo tasks **read-only** or be ready to re-restore.
 
-### 7.5 Still unwired ⬜
+### 7.5 Running a rollout ✅
 
-- The agent loop itself (Gemini deciding actions against a live Metabase task).
-- Step-count cap, rollout logging, and any grading — see §12.6 for why `COMPLETE` must not
-  be read as "succeeded".
-- Unattended handling of the `require_confirmation` safety prompt (§12.5) — it calls
-  `input()` and will hang a batch run.
-- Whether the browser runs on the host (current setup) or in its own container beside
-  Metabase.
-- Auth strategy, reset strategy, harness lifecycle — see §8.
+Three things must be true before any attempt: Colima up, gym healthy, auth cookie captured.
+
+```bash
+colima start                                              # VM does not survive reboot
+cd /Users/gkumar/assessments/hackathon/metabase && docker compose up -d
+until [ "$(docker inspect -f '{{.State.Health.Status}}' mb-app)" = "healthy" ]; do sleep 3; done
+
+cd /Users/gkumar/assessments/hackathon
+agent/.venv/bin/python -m rlgym.capture_auth               # once; re-run if session expires
+
+# one attempt, one task
+agent/.venv/bin/python -m rlgym.run_one --task problem10
+```
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--headed` | Show the browser window. Best way to watch what the agent is doing. |
+| `--max-steps N` | Override the 40-step budget. `--max-steps 1` is a fast plumbing check. |
+| `--timeout S` | Wall-clock budget (default 600s). |
+| `--model M` | Any of the 5 reachable computer-use models. |
+| `--hint "..."` | Extra guidance appended to the prompt; recorded for ablation grouping. |
+| `--no-video` | Skip video recording. |
+
+**Exit code is 1 only for `ERRORED`.** A wrong answer is a valid outcome and must not look
+like a broken pipeline to a caller or CI step.
+
+### 7.6 Where artifacts land
+
+```
+runs/<job_id or "adhoc">/<attempt_id>/
+├── artifact.json      full trajectory: status, steps, tokens, refusals
+├── evaluation.json    verdict, reward, diff, evaluator_version
+├── spec.json          exact inputs -- makes the attempt reproducible
+├── steps/             step_000_click.png, ... one screenshot per action
+├── video/*.webm       full session recording
+└── worker.log         subprocess stdout/stderr -- first place to look on ERRORED
+```
+
+`artifact.json` is rewritten after **every step**, so a killed attempt keeps its partial
+trajectory and a UI can follow a run live.
+
+### 7.7 Attempt failure modes and what they mean
+
+| Status | Meaning | What to do |
+|---|---|---|
+| `COMPLETED_CORRECT` | Answer matched. reward 1 | — |
+| `COMPLETED_INCORRECT` | Submitted a wrong answer, or stopped without submitting. reward 0 | Read `evaluation.json` → `diff` |
+| `MAX_STEPS_EXCEEDED` | Ran out of steps. reward 0 | Check the action sequence for a loop; consider `--max-steps` |
+| `TIMED_OUT` | Ran out of wall clock. reward 0 | Usually a slow gym or a stuck page |
+| `ERRORED` | **Infra failure. reward null, excluded from pass@k** | See below |
+
+Common `ERRORED` causes, all verified:
+
+```
+"GEMINI_API_KEY missing from .env"                  -> add the key
+401 UNAUTHENTICATED                                 -> key invalid or revoked
+"not authenticated after injecting storage_state"   -> python -m rlgym.capture_auth
+"no storage_state at ..."                           -> python -m rlgym.capture_auth
+"worker produced no artifact"                       -> read worker.log; usually an import error
+```
+
+### 7.8 Tests
+
+```bash
+agent/.venv/bin/python -m pytest tests/ -q          # 44 tests
+```
+
+`tests/test_grader.py` is pure logic and runs anywhere. `tests/test_computer.py` needs the
+gym plus a captured cookie and **skips cleanly** without them, so the suite stays green on a
+fresh checkout.
+
+### 7.9 Still unwired ⬜
+
+- **Job runner**: T×K attempts in parallel with resume. `execute_attempt()` is already the
+  atomic unit it will call, so this adds orchestration only.
+- **FastAPI + React UI**: submit jobs, browse transcripts. UI design deferred by agreement.
+- **Reset between rollouts**: `TEMPLATE` approach decided (§8.2) but not implemented —
+  genuinely unnecessary today because all 10 tasks are read-only.
+- **Milestone 3 write-up**: productionization design.
+- Whether the browser should move into a container beside Metabase (currently host-side).
+
+Already handled, for the record: the step cap, the `input()` hang, and API errors masquerading
+as success are all fixed in `rlgym/agents/gemini_cu.py` rather than inherited from upstream.
 
 ---
 
