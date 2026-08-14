@@ -120,9 +120,10 @@ milestones** — the orchestrator calls the same `execute_attempt()` that `run_o
 the API will call the orchestrator through `service.py`.
 
 ```
-                    ┌──────────────────────────────────────────────┐
-   HTTP API  ─────► │ service.py    no web framework imported      │
-   (not built)      │               submit / poll / cancel / read  │
+   web/ (React+TS) ──► server/app.py  thin routes, no logic
+                    ┌───────────────────────▼──────────────────────┐
+                    │ service.py    no web framework imported      │
+                    │               submit / poll / cancel / read  │
                     └───────────────────────┬──────────────────────┘
                                             ▼
                     ┌──────────────────────────────────────────────┐
@@ -345,6 +346,9 @@ Then open http://localhost:3000 → log in as `daksh@deeptune.com` / `Daksh@123`
 
 | Goal | Command |
 |---|---|
+| **Start the platform** | `agent/.venv/bin/uvicorn server.app:app --port 8000` → http://localhost:8000 |
+| Rebuild the UI | `export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH" && cd web && npm run build` |
+| Run a job from the CLI | `agent/.venv/bin/python -m rlgym.scripts.run_job --tasks problem10 --attempts 3` |
 | Is the gym up? | `docker compose ps` · `curl -s localhost:3000/api/health` |
 | Mint the auth cookie (once) | `agent/.venv/bin/python -m rlgym.capture_auth` |
 | **Run one attempt** | `agent/.venv/bin/python -m rlgym.run_one --task problem10` |
@@ -396,11 +400,14 @@ isolating "is the key live?" from "is the gym reachable?" when something breaks.
 ✅ Orchestrator T×K in parallel, attempt-major, resumable, pass@k
 ✅ Service      framework-agnostic seam the API will sit on
 ✅ CLIs         scripts/run_one.py (one attempt) · scripts/run_job.py (a job)
-⬜ HTTP API     FastAPI routes over service.py -- pure wiring, not written
-⬜ Frontend     React + TS; UI design to be discussed separately
+✅ HTTP API     FastAPI over service.py; /docs for the interactive spec
+✅ Frontend     React + TS eval console -- upload tasks, set K, view transcripts
 ⬜ Reset        TEMPLATE approach decided, not implemented (unneeded: read-only tasks)
 ⬜ M3           productionization design not written
 ```
+
+**Milestone 2's three UI requirements**, all working: submit a job from a tasks file,
+specify attempts per problem, and visually review each attempt's transcript and grade.
 
 **Measured job throughput:** 6 real attempts at concurrency 3 finished in 16s wall clock
 (sequential would have been ~48s), with three attempts starting simultaneously and the next

@@ -786,7 +786,75 @@ agent/.venv/bin/python -m rlgym.scripts.run_job \
 agent/.venv/bin/python -m rlgym.scripts.run_job --tasks problem10 --attempts 3
 ```
 
-### Not built yet
+### Not built yet (at the time of the backend checkpoint)
 
 FastAPI routes over `service.py` (pure wiring), the React/TS frontend (UI design to be
 discussed separately), reset-between-rollouts, and the Milestone 3 write-up.
+
+---
+
+# Phase 5: Milestone 2 — Web Platform (API + UI)
+
+## Status: ✅ Milestone 2 complete — backend and frontend both run
+
+All three Milestone 2 UI requirements work end to end: **ingest a `tasks.json`**, **specify
+attempts per problem**, and **visually review transcripts and grades**. Stopping here;
+Milestone 3 is not started.
+
+### What was built
+
+| File | Role |
+|---|---|
+| `server/app.py` | FastAPI routes — every one is a service call plus serialization |
+| `web/` | React + TS console (Vite), plain white, no UI framework |
+| `web/src/NewRun.tsx` | Upload/choose task file, select tasks, set K + concurrency, run |
+| `web/src/JobView.tsx` | Job stats, per-task cards, attempt chips |
+| `web/src/Transcript.tsx` | Grade panel, per-step slides, video tab |
+| `requirements.txt` | The platform's own deps, which weren't recorded anywhere before |
+
+### Start it
+
+```bash
+agent/.venv/bin/uvicorn server.app:app --port 8000     # serves API + built UI
+# → http://localhost:8000        (interactive API spec at /docs)
+```
+
+Frontend rebuild needs **Node 18+** — the default `node` here is v14, which Vite cannot
+use: `export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH"` then `cd web && npm run build`.
+
+### Verified in a real browser
+
+Screenshotted the running app against live data. The home page renders health pills (gym
+up / auth captured), the task checklist from `tasks.json`, K and concurrency inputs, a cost
+warning when the run is large, and previous runs including one live `RUNNING` job. The
+transcript view renders the GRADE panel, attempt chips, the agent's screenshot beside its
+reasoning and chosen action, and the step pager.
+
+Also verified through the API: uploading a task file with a **different shape** to the
+bundled one, and every validation failure returning a specific message rather than a 500.
+
+### Decisions worth recording
+
+**Uploads never touch `resources/tasks.json`.** They're validated *before* being written and
+stored in `uploads/`. The stored path goes into the job spec, so an uploaded file genuinely
+drives the run rather than only changing what's displayed.
+
+**The UI never calls an ERRORED attempt "Failed".** Its chip says "Errored" and its grade
+panel states the reward is null and excluded from pass@k. Showing a zero there would
+contradict the whole reason that distinction exists.
+
+**Health is surfaced up front.** The two setup failures that make every run fail — gym down,
+auth cookie missing — appear in the header with the fix command, so nobody debugs a failed
+job when the real problem is setup.
+
+**No websockets.** A running job is followed by polling `job.json`, which is already written
+after every attempt. Simpler, and it survives a page reload.
+
+**No router dependency.** Two routes are handled with ~15 lines of hash routing, which keeps
+job URLs shareable.
+
+### Not built (Milestone 3, by agreement)
+
+Productionization design: what changes when the agent writes as well as reads, and how this
+scales to thousands of rollouts. Reset-between-rollouts is also still unimplemented — it's
+genuinely unnecessary while every task is read-only.

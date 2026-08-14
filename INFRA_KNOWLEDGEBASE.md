@@ -608,7 +608,79 @@ the API abandons in-flight jobs. Artifacts and `job.json` survive and `resume_jo
 them up. Moving that registry to a queue or DB is the Milestone 3 answer, not something to
 fake now.
 
-### 7.12 Still unwired ⬜
+### 7.12 The web platform (API + UI)
+
+**Start it** — one process serves both the API and the built UI:
+
+```bash
+cd /Users/gkumar/assessments/hackathon
+agent/.venv/bin/uvicorn server.app:app --port 8000
+# open http://localhost:8000
+```
+
+**First time / after pulling**, install the platform deps and build the UI:
+
+```bash
+agent/.venv/bin/pip install -r requirements.txt          # fastapi, uvicorn, multipart
+
+# Node 18+ required. The default node here is v14, which Vite cannot use:
+export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH"
+cd web && npm install && npm run build && cd ..
+```
+
+**Frontend development** (hot reload) runs Vite separately; it proxies `/api` to :8000:
+
+```bash
+agent/.venv/bin/uvicorn server.app:app --reload --port 8000   # terminal 1
+cd web && npm run dev                                          # terminal 2 → :5173
+```
+
+Interactive API docs are at http://localhost:8000/docs.
+
+#### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | gym reachable, auth captured, task count |
+| GET | `/api/tasks` | list tasks (optionally `?tasks_file=`) |
+| POST | `/api/tasks/upload` | validate + store an uploaded tasks.json |
+| POST | `/api/jobs` | submit a job; returns immediately |
+| GET | `/api/jobs` | list jobs, newest first |
+| GET | `/api/jobs/{id}` | job state — poll this to follow a run |
+| POST | `/api/jobs/{id}/cancel` | stop scheduling new attempts |
+| GET | `/api/jobs/{id}/attempts/{aid}` | full transcript + verdict |
+| GET | `/api/jobs/{id}/attempts/{aid}/media/{path}` | screenshot or video |
+
+#### Uploaded task files
+
+Land in `uploads/` (git-ignored), **never** over `resources/tasks.json`. Validated before
+being written, so a bad file fails immediately with a specific message rather than surfacing
+later as a confusing job failure:
+
+```
+not valid JSON: ...                     expected a JSON array of tasks, got dict
+task file is empty                      task 0 is missing required field(s): task, answer
+task 'a': 'answer' must be a JSON string, but failed to parse: ...
+duplicate task id 'a'
+```
+
+The stored path is recorded in the job spec, so an uploaded file genuinely drives the run.
+
+#### UI structure
+
+- **New eval run** — pick the task file (bundled or uploaded), select tasks, set K,
+  concurrency, optional max-steps, then run. Warns about cost when the run is large.
+- **Job view** — progress, pass@k, passed/failed/errored counts, then one card per task
+  with attempt chips.
+- **Transcript** — screenshot on the left, the agent's reasoning and the action it took on
+  the right, one slide per step (arrow keys page through), plus a video tab and a GRADE
+  panel with expected vs actual.
+
+An ERRORED attempt is labelled "Errored", never "Failed", and its grade panel says the
+reward is null and excluded from pass@k — the UI must not imply the agent got it wrong when
+the outcome was never observed.
+
+### 7.13 Still unwired ⬜
 
 - **HTTP API**: FastAPI routes over `service.py` (§7.11). Pure wiring — the service layer
   already returns pydantic models, so routes are little more than serialization.

@@ -1,0 +1,12 @@
+# Our own dependencies, on top of the vendored clone's requirements.
+#
+#   agent/.venv/bin/pip install -r agent/computer-use-preview/requirements.txt
+#   agent/.venv/bin/pip install -r requirements.txt
+#
+# The clone supplies google-genai, playwright, pydantic, python-dotenv and pytest;
+# everything below is what the platform layer adds.
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+# Required by FastAPI for multipart/form-data -- the tasks.json upload endpoint.
+python-multipart==0.0.32
