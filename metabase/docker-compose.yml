@@ -1,0 +1,80 @@
+name: metabase-gym
+
+# Metabase pinned to v0.54.15 deliberately.
+# resources/metabase_envdata.sql is a Metabase v0.54-era app DB (newest Liquibase changeset
+# in the dump: v54.2025-03-28T11:22:01). Booting a newer MINOR (v0.55+) against this DB
+# would migrate the schema far forward and permanently alter the seeded environment.
+#
+# Verified behaviour on v0.54.15: it applies exactly 5 forward changesets on first boot
+# (475 -> 480 rows in databasechangelog) -- one permissions data migration (v52.2025-05-28,
+# confirmed a NO-OP here: data_permissions is byte-identical to the dump) and four
+# search-index plumbing changesets (v53.2025-05-06, v54.2025-05-13 x3). No seeded content
+# is altered, and the 5 are applied identically on every fresh restore, so resets stay
+# deterministic. Pin v0.54.5 instead if you ever need a literally zero-migration restore --
+# that is the patch the dump's source instance was actually running.
+
+services:
+  postgres:
+    image: postgres:16.9
+    container_name: mb-postgres
+    restart: unless-stopped
+    environment:
+      # User is 'postgres' on purpose: every object in metabase_envdata.sql is owned by
+      # 'postgres', so matching it avoids "role does not exist" errors on pg_restore.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: metabase_app
+    ports:
+      # 5433 on the host to stay clear of any future local postgres on 5432.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Read-only so the dumps can never be modified in place. Gives us an in-container
+      # pg_restore path whose client version matches the server exactly (16.x).
+      - ../resources:/resources:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d metabase_app"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  metabase:
+    image: metabase/metabase:v0.54.15
+    container_name: mb-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Postgres app DB rather than the default embedded H2 -- required so the
+      # env-data dump has a Postgres target to restore into.
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: postgres
+      MB_DB_PORT: 5432
+      MB_DB_DBNAME: metabase_app
+      MB_DB_USER: postgres
+      MB_DB_PASS: postgres
+      JAVA_TIMEZONE: UTC
+      # NOTE: plugins dir is left at its default (/plugins) on purpose.
+      # metabase_envdata.sql hardcodes the bundled H2 sample database as
+      # {"db":"file:/app/plugins/sample-database.db;USER=GUEST;PASSWORD=guest"} -- the older
+      # image layout, where WORKDIR was /app. This image's WORKDIR is /, so the sample DB
+      # lands at /plugins/sample-database.db instead.
+      # MB_PLUGINS_DIR=/app/plugins does NOT work here: the JVM runs as a non-root user and
+      # /app is root-owned 755, so Metabase hits AccessDeniedException and silently falls
+      # back to a temp dir. /plugins is 777 in the image, which is why the default works.
+      # Metabase rewrites the sample database's path on startup when it has moved, so the
+      # restored row is expected to self-heal to /plugins -- verified post-restore in
+      # PROGRESS.md rather than assumed.
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail -I http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  pgdata:
