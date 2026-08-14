@@ -26,7 +26,8 @@ import pathlib
 import time
 from urllib.parse import urlparse
 
-from . import vendor  # noqa: F401  -- puts the vendored clone on sys.path
+# Classes, so imported directly. sys.path is set up by rlgym/__init__.py, so these no
+# longer depend on import order.
 from computers import EnvState  # type: ignore[import-not-found]
 from computers.playwright.playwright import (  # type: ignore[import-not-found]
     PlaywrightComputer,
@@ -77,7 +78,7 @@ class GymComputer(PlaywrightComputer):
         video_dir: pathlib.Path | str | None = None,
         trace_path: pathlib.Path | str | None = None,
         headless: bool = True,
-        highlight_mouse: bool = False,
+        highlight_mouse: bool = True,
         prohibited_actions: tuple[str, ...] | list[str] = (),
     ) -> None:
         super().__init__(

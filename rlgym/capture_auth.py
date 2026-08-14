@@ -29,9 +29,9 @@ import sys
 
 from dotenv import load_dotenv
 
-from .vendor import PROJECT_ROOT, STORAGE_STATE
+from . import vendor
 
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(vendor.PROJECT_ROOT / ".env")
 
 EMAIL_SELECTOR = 'input[name="username"], input[type="email"]'
 PASSWORD_SELECTOR = 'input[name="password"], input[type="password"]'
@@ -42,7 +42,7 @@ def capture(
     gym_url: str | None = None,
     email: str | None = None,
     password: str | None = None,
-    out_path: pathlib.Path = STORAGE_STATE,
+    out_path: pathlib.Path = vendor.STORAGE_STATE,
 ) -> pathlib.Path:
     from playwright.sync_api import sync_playwright
 
@@ -92,7 +92,7 @@ def capture(
     return out_path
 
 
-def verify(gym_url: str | None = None, state_path: pathlib.Path = STORAGE_STATE) -> bool:
+def verify(gym_url: str | None = None, state_path: pathlib.Path = vendor.STORAGE_STATE) -> bool:
     """Prove the cookie works in a *fresh* context, which is how attempts will use it."""
     from playwright.sync_api import sync_playwright
 

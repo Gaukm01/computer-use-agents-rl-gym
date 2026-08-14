@@ -28,14 +28,10 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .schemas import (
-    GRADEABLE_STATUSES,
-    AttemptArtifact,
-    AttemptStatus,
-    EvaluationResult,
-    Task,
-    reward_for_status,
-)
+# Module import for behaviour (schemas.reward_for_status), direct import for the types
+# used in annotations -- qualifying those adds length without adding information.
+from . import schemas
+from .schemas import AttemptArtifact, AttemptStatus, EvaluationResult, Task
 
 EVALUATOR_VERSION = "1.0.0"
 
@@ -288,8 +284,8 @@ def grade(artifact: AttemptArtifact, task: Task) -> EvaluationResult:
             evaluator_version=EVALUATOR_VERSION,
         )
 
-    if artifact.status not in GRADEABLE_STATUSES:
-        reward = reward_for_status(artifact.status)
+    if artifact.status not in schemas.GRADEABLE_STATUSES:
+        reward = schemas.reward_for_status(artifact.status)
         if artifact.status is AttemptStatus.ERRORED:
             return result(
                 "not_graded",

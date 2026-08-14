@@ -10,13 +10,13 @@ from __future__ import annotations
 import json
 import pathlib
 
+from . import vendor
 from .schemas import Task
-from .vendor import TASKS_FILE
 
 
 def load_tasks(path: pathlib.Path | str | None = None) -> list[Task]:
     """Load every task, preserving file order."""
-    path = pathlib.Path(path) if path else TASKS_FILE
+    path = pathlib.Path(path) if path else vendor.TASKS_FILE
     raw = json.loads(path.read_text())
     if not isinstance(raw, list):
         raise ValueError(f"{path} must contain a JSON array of tasks, got {type(raw)}")
@@ -28,7 +28,9 @@ def load_task_map(path: pathlib.Path | str | None = None) -> dict[str, Task]:
     seen: dict[str, Task] = {}
     for task in tasks:
         if task.id in seen:
-            raise ValueError(f"duplicate task id {task.id!r} in {path or TASKS_FILE}")
+            raise ValueError(
+                f"duplicate task id {task.id!r} in {path or vendor.TASKS_FILE}"
+            )
         seen[task.id] = task
     return seen
 

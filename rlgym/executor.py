@@ -35,8 +35,10 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
+# Modules for behaviour, so call sites say where it lives -- grader.grade() is pure, while
+# grade_attempt() below also mutates status and writes to disk. Types stay direct.
+from . import grader, vendor
 from .agents.base import AgentRunResult
-from .grader import grade
 from .schemas import (
     AgentConfig,
     AttemptArtifact,
@@ -47,7 +49,6 @@ from .schemas import (
     StopReason,
     Task,
 )
-from .vendor import PROJECT_ROOT, RUNS_DIR, STORAGE_STATE
 
 # Extra wall-clock the parent allows beyond the agent's own soft deadline, so a clean
 # shutdown (closing the context, flushing the video) can finish before the SIGKILL lands.
@@ -85,7 +86,7 @@ def new_attempt_id(task_id: str, attempt_index: int) -> str:
 
 
 def attempt_dir(attempt_id: str, job_id: str | None = None) -> pathlib.Path:
-    return RUNS_DIR / (job_id or "adhoc") / attempt_id
+    return vendor.RUNS_DIR / (job_id or "adhoc") / attempt_id
 
 
 def write_artifact(artifact: AttemptArtifact, out_dir: pathlib.Path) -> None:
@@ -123,7 +124,7 @@ def build_prompt(task: Task, agent_config: AgentConfig) -> str:
 
 def run_attempt_worker(spec_path: pathlib.Path) -> int:
     """Execute one attempt in this process. Writes the artifact as it goes."""
-    load_dotenv(PROJECT_ROOT / ".env")
+    load_dotenv(vendor.PROJECT_ROOT / ".env")
 
     spec = json.loads(spec_path.read_text())
     task = Task.model_validate(spec["task"])
@@ -182,7 +183,7 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
 
     steps_dir = out_dir / STEPS_DIR
     video_dir = (out_dir / VIDEO_DIR) if record_video else None
-    storage_state = STORAGE_STATE if STORAGE_STATE.is_file() else None
+    storage_state = vendor.STORAGE_STATE if vendor.STORAGE_STATE.is_file() else None
 
     result: AgentRunResult | None = None
     # The agent stops itself slightly before the parent's kill deadline.
@@ -205,7 +206,7 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
                 artifact.status = AttemptStatus.ERRORED
                 artifact.stop_reason = StopReason.HARNESS_ERROR
                 artifact.error = (
-                    f"no storage_state at {STORAGE_STATE}; run "
+                    f"no storage_state at {vendor.STORAGE_STATE}; run "
                     "`python -m rlgym.capture_auth` first"
                 )
                 finalize()
@@ -323,7 +324,7 @@ def execute_attempt(
         # the browser and driver it spawned rather than orphaning them.
         proc = subprocess.Popen(
             cmd,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(vendor.PROJECT_ROOT),
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -391,7 +392,7 @@ def grade_attempt(artifact: AttemptArtifact, task: Task) -> EvaluationResult:
     the executor never decides correctness, and the grader is the only thing that can set
     COMPLETED_CORRECT.
     """
-    evaluation = grade(artifact, task)
+    evaluation = grader.grade(artifact, task)
     out_dir = attempt_dir(artifact.attempt_id, artifact.job_id)
 
     if evaluation.verdict == "pass":

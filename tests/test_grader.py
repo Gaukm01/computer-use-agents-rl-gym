@@ -13,7 +13,7 @@ import copy
 
 import pytest
 
-from rlgym.grader import compare_outputs, grade
+from rlgym import grader, tasks
 from rlgym.schemas import (
     AgentConfig,
     AttemptArtifact,
@@ -22,9 +22,8 @@ from rlgym.schemas import (
     StopReason,
     Task,
 )
-from rlgym.tasks import load_task_map
 
-TASKS = load_task_map()
+TASKS = tasks.load_task_map()
 
 
 def make_artifact(
@@ -57,7 +56,7 @@ def make_artifact(
 def test_expected_answer_grades_pass(task_id: str) -> None:
     task = TASKS[task_id]
     artifact = make_artifact(task_id, actual_output=task.expected_output())
-    result = grade(artifact, task)
+    result = grader.grade(artifact, task)
     assert result.verdict == "pass", result.diff
     assert result.reward == 1
 
@@ -76,7 +75,7 @@ def test_wrong_pairing_fails() -> None:
     assert answer["ratings"] != task.expected_output()["ratings"]
     assert sorted(answer["ratings"]) == sorted(task.expected_output()["ratings"])
 
-    result = grade(make_artifact("problem1", answer), task)
+    result = grader.grade(make_artifact("problem1", answer), task)
     assert result.verdict == "fail"
     assert "do not match" in (result.diff or "")
 
@@ -90,7 +89,7 @@ def test_parallel_rows_reordered_together_passes() -> None:
         "product_titles": [expected["product_titles"][i] for i in order],
         "order_counts": [expected["order_counts"][i] for i in order],
     }
-    result = grade(make_artifact("problem2", answer), task)
+    result = grader.grade(make_artifact("problem2", answer), task)
     assert result.verdict == "pass", result.diff
 
 
@@ -98,7 +97,7 @@ def test_single_list_order_does_not_matter() -> None:
     """problem9 is a set of names -- order carries no meaning."""
     task = TASKS["problem9"]
     answer = {"names": list(reversed(task.expected_output()["names"]))}
-    result = grade(make_artifact("problem9", answer), task)
+    result = grader.grade(make_artifact("problem9", answer), task)
     assert result.verdict == "pass", result.diff
 
 
@@ -112,7 +111,7 @@ def test_thousands_separator_passes() -> None:
     task = TASKS["problem8"]
     answer = dict(task.expected_output())
     answer["sum"] = "101,203.30"
-    result = grade(make_artifact("problem8", answer), task)
+    result = grader.grade(make_artifact("problem8", answer), task)
     assert result.verdict == "pass", result.diff
 
 
@@ -121,20 +120,20 @@ def test_int_float_equivalence_passes() -> None:
     task = TASKS["problem1"]
     answer = copy.deepcopy(task.expected_output())
     answer["ratings"] = [4.6, 5.0, 5.0]
-    assert grade(make_artifact("problem1", answer), task).verdict == "pass"
+    assert grader.grade(make_artifact("problem1", answer), task).verdict == "pass"
 
 
 def test_string_case_and_whitespace_tolerated() -> None:
     task = TASKS["problem3"]
     answer = {k: f"  {v.upper()}  " for k, v in task.expected_output().items()}
-    result = grade(make_artifact("problem3", answer), task)
+    result = grader.grade(make_artifact("problem3", answer), task)
     assert result.verdict == "pass", result.diff
 
 
 def test_float_rounding_within_tolerance_passes() -> None:
     task = TASKS["problem10"]
     answer = {"avg_rating": 3.1500001}
-    assert grade(make_artifact("problem10", answer), task).verdict == "pass"
+    assert grader.grade(make_artifact("problem10", answer), task).verdict == "pass"
 
 
 # ----------------------------------------------------------------------------------------
@@ -144,7 +143,7 @@ def test_float_rounding_within_tolerance_passes() -> None:
 
 def test_wrong_number_fails() -> None:
     task = TASKS["problem10"]
-    result = grade(make_artifact("problem10", {"avg_rating": 4.2}), task)
+    result = grader.grade(make_artifact("problem10", {"avg_rating": 4.2}), task)
     assert result.verdict == "fail"
     assert result.reward == 0
 
@@ -153,14 +152,14 @@ def test_missing_key_fails() -> None:
     task = TASKS["problem5"]
     answer = task.expected_output()
     answer.pop("rating")
-    result = grade(make_artifact("problem5", answer), task)
+    result = grader.grade(make_artifact("problem5", answer), task)
     assert result.verdict == "fail"
     assert "missing key" in (result.diff or "")
 
 
 def test_extra_key_fails() -> None:
     task = TASKS["problem10"]
-    result = grade(
+    result = grader.grade(
         make_artifact("problem10", {"avg_rating": 3.15, "extra": 1}), task
     )
     assert result.verdict == "fail"
@@ -170,7 +169,7 @@ def test_extra_key_fails() -> None:
 def test_wrong_list_length_fails() -> None:
     task = TASKS["problem9"]
     answer = {"names": task.expected_output()["names"][:2]}
-    result = grade(make_artifact("problem9", answer), task)
+    result = grader.grade(make_artifact("problem9", answer), task)
     assert result.verdict == "fail"
 
 
@@ -187,7 +186,7 @@ def test_over_specified_string_is_near_miss() -> None:
     task = TASKS["problem6"]
     answer = dict(task.expected_output())
     answer["quarter"] = "Q4 2025"
-    result = grade(make_artifact("problem6", answer), task)
+    result = grader.grade(make_artifact("problem6", answer), task)
     assert result.verdict == "fail"
     assert result.near_miss is True
 
@@ -195,14 +194,14 @@ def test_over_specified_string_is_near_miss() -> None:
 def test_slightly_off_number_is_near_miss() -> None:
     """A value read off a rounded chart label."""
     task = TASKS["problem10"]
-    result = grade(make_artifact("problem10", {"avg_rating": 3.2}), task)
+    result = grader.grade(make_artifact("problem10", {"avg_rating": 3.2}), task)
     assert result.verdict == "fail"
     assert result.near_miss is True
 
 
 def test_badly_wrong_number_is_not_near_miss() -> None:
     task = TASKS["problem10"]
-    result = grade(make_artifact("problem10", {"avg_rating": 1.0}), task)
+    result = grader.grade(make_artifact("problem10", {"avg_rating": 1.0}), task)
     assert result.near_miss is False
 
 
@@ -217,7 +216,7 @@ def test_errored_is_not_graded_and_reward_is_none() -> None:
     artifact = make_artifact(
         "problem1", status=AttemptStatus.ERRORED, error="Gemini 503"
     )
-    result = grade(artifact, task)
+    result = grader.grade(artifact, task)
     assert result.verdict == "not_graded"
     assert result.reward is None
     assert artifact.reward is None
@@ -230,7 +229,7 @@ def test_budget_exhaustion_is_reward_zero(status: AttemptStatus) -> None:
     """Running out of budget IS agent failure, unlike ERRORED."""
     task = TASKS["problem1"]
     artifact = make_artifact("problem1", status=status)
-    result = grade(artifact, task)
+    result = grader.grade(artifact, task)
     assert result.verdict == "fail"
     assert result.reward == 0
     assert artifact.reward == 0
@@ -239,7 +238,7 @@ def test_budget_exhaustion_is_reward_zero(status: AttemptStatus) -> None:
 def test_no_answer_submitted_fails() -> None:
     task = TASKS["problem1"]
     artifact = make_artifact("problem1", actual_output=None)
-    result = grade(artifact, task)
+    result = grader.grade(artifact, task)
     assert result.verdict == "fail"
     assert result.reward == 0
     assert "without calling submit_answer" in (result.diff or "")
@@ -250,7 +249,7 @@ def test_unparseable_answer_reports_the_raw_text() -> None:
     artifact = make_artifact(
         "problem1", actual_output=None, actual_output_raw="here you go: {oops"
     )
-    result = grade(artifact, task)
+    result = grader.grade(artifact, task)
     assert result.verdict == "fail"
     assert "not valid JSON" in (result.diff or "")
 
@@ -262,11 +261,11 @@ def test_unparseable_answer_reports_the_raw_text() -> None:
 
 def test_answer_of_wrong_type_fails_cleanly() -> None:
     task = TASKS["problem10"]
-    result = grade(make_artifact("problem10", ["not", "a", "dict"]), task)
+    result = grader.grade(make_artifact("problem10", ["not", "a", "dict"]), task)
     assert result.verdict == "fail"
     assert "expected an object" in (result.diff or "")
 
 
 def test_compare_outputs_is_usable_standalone() -> None:
-    assert compare_outputs({"a": 1}, {"a": 1.0}).matched
-    assert not compare_outputs({"a": 1}, {"a": 2}).matched
+    assert grader.compare_outputs({"a": 1}, {"a": 1.0}).matched
+    assert not grader.compare_outputs({"a": 1}, {"a": 2}).matched

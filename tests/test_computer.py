@@ -15,8 +15,10 @@ import urllib.request
 
 import pytest
 
-from rlgym.computer import ActionRefused, GymComputer, same_origin
-from rlgym.vendor import STORAGE_STATE
+# `computer` is the module; the browser instance in each test is named `browser` so it
+# cannot shadow it. Classes stay direct.
+from rlgym import computer, vendor
+from rlgym.computer import ActionRefused, GymComputer
 
 GYM_URL = "http://localhost:3000"
 
@@ -33,7 +35,7 @@ needs_gym = pytest.mark.skipif(
     not gym_is_up(), reason="gym not running on localhost:3000"
 )
 needs_auth = pytest.mark.skipif(
-    not STORAGE_STATE.is_file(),
+    not vendor.STORAGE_STATE.is_file(),
     reason="no storage_state.json -- run python -m rlgym.capture_auth",
 )
 
@@ -57,7 +59,7 @@ needs_auth = pytest.mark.skipif(
     ],
 )
 def test_same_origin(url: str, allowed: bool) -> None:
-    assert same_origin(url, GYM_URL) is allowed
+    assert computer.same_origin(url, GYM_URL) is allowed
 
 
 # ----------------------------------------------------------------------------------------
@@ -70,10 +72,10 @@ def test_same_origin(url: str, allowed: bool) -> None:
 def test_starts_authenticated_via_storage_state() -> None:
     """Pre-auth means an attempt never spends budget on the login form."""
     with GymComputer(
-        gym_url=GYM_URL, storage_state=STORAGE_STATE, headless=True
-    ) as computer:
-        computer.wait_for_ready()
-        assert computer.is_authenticated(), "expected to bypass /auth/login"
+        gym_url=GYM_URL, storage_state=vendor.STORAGE_STATE, headless=True
+    ) as browser:
+        browser.wait_for_ready()
+        assert browser.is_authenticated(), "expected to bypass /auth/login"
 
 
 @needs_gym
@@ -83,22 +85,22 @@ def test_offsite_navigation_is_refused() -> None:
     Checked before upstream's https:// prepending, so the message names the URL the model
     actually requested.
     """
-    with GymComputer(gym_url=GYM_URL, headless=True) as computer:
+    with GymComputer(gym_url=GYM_URL, headless=True) as browser:
         with pytest.raises(ActionRefused) as exc:
-            computer.navigate("https://www.google.com")
+            browser.navigate("https://www.google.com")
         assert "refused" in str(exc.value)
-        assert computer.refusals, "refusal should be recorded for the artifact"
+        assert browser.refusals, "refusal should be recorded for the artifact"
         # The agent stays where it was rather than being silently teleported.
-        assert same_origin(computer.current_state().url, GYM_URL)
+        assert computer.same_origin(browser.current_state().url, GYM_URL)
 
 
 @needs_gym
 def test_search_action_cannot_leave_the_gym() -> None:
     """`search` normally jumps to a search engine. It stays in the tool set -- the lock
     refuses it -- so the agent gets an observation instead of a missing capability."""
-    with GymComputer(gym_url=GYM_URL, headless=True) as computer:
+    with GymComputer(gym_url=GYM_URL, headless=True) as browser:
         with pytest.raises(ActionRefused):
-            computer.search()
+            browser.search()
 
 
 @needs_gym
@@ -106,18 +108,18 @@ def test_prohibited_actions_are_enforced() -> None:
     """Empty by default; this proves the knob works when a run does set it."""
     with GymComputer(
         gym_url=GYM_URL, headless=True, prohibited_actions=("scroll_document",)
-    ) as computer:
-        computer.check_action_allowed("click")  # not prohibited -> no raise
+    ) as browser:
+        browser.check_action_allowed("click")  # not prohibited -> no raise
         with pytest.raises(ActionRefused):
-            computer.check_action_allowed("scroll_document")
+            browser.check_action_allowed("scroll_document")
 
 
 @needs_gym
 def test_screenshot_shape_matches_the_model_contract() -> None:
     """PNG bytes at the viewport size the agent's coordinates are denormalized against."""
-    with GymComputer(gym_url=GYM_URL, headless=True) as computer:
-        state = computer.current_state()
+    with GymComputer(gym_url=GYM_URL, headless=True) as browser:
+        state = browser.current_state()
         assert state.screenshot[:8] == b"\x89PNG\r\n\x1a\n"
         width = int.from_bytes(state.screenshot[16:20], "big")
         height = int.from_bytes(state.screenshot[20:24], "big")
-        assert (width, height) == tuple(computer.screen_size())
+        assert (width, height) == tuple(browser.screen_size())

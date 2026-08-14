@@ -19,12 +19,11 @@ import sys
 
 from dotenv import load_dotenv
 
-from .executor import attempt_dir, execute_attempt, grade_attempt
+# Modules for behaviour, types direct.
+from . import executor, tasks, vendor
 from .schemas import AgentConfig, AttemptStatus, Limits
-from .tasks import load_task_map
-from .vendor import PROJECT_ROOT
 
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(vendor.PROJECT_ROOT / ".env")
 
 # ANSI, kept trivial -- no dependency needed for four colours.
 BOLD, DIM, RED, GREEN, YELLOW, RESET = (
@@ -69,16 +68,17 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        tasks = load_task_map(args.tasks_file)
+        # Named task_map, not tasks -- `tasks` is the module.
+        task_map = tasks.load_task_map(args.tasks_file)
     except Exception as exc:
         print(f"{RED}failed to load tasks: {exc}{RESET}")
         return 2
 
-    if args.task not in tasks:
+    if args.task not in task_map:
         print(f"{RED}unknown task {args.task!r}{RESET}")
-        print(f"available: {', '.join(tasks)}")
+        print(f"available: {', '.join(task_map)}")
         return 2
-    task = tasks[args.task]
+    task = task_map[args.task]
 
     defaults = Limits()
     limits = Limits(
@@ -95,7 +95,7 @@ def main() -> int:
     print(f"{BOLD}model{RESET}   {agent_config.model}")
     print(f"{DIM}running (headless={not args.headed}) ...{RESET}\n")
 
-    artifact = execute_attempt(
+    artifact = executor.execute_attempt(
         task,
         agent_config=agent_config,
         limits=limits,
@@ -103,7 +103,9 @@ def main() -> int:
         headless=not args.headed,
         record_video=not args.no_video,
     )
-    evaluation = grade_attempt(artifact, task)
+    # executor.grade_attempt, not grader.grade: this one also promotes the status on a
+    # pass and persists both records.
+    evaluation = executor.grade_attempt(artifact, task)
 
     colour = STATUS_COLOUR.get(artifact.status, "")
     reward = artifact.reward
@@ -148,7 +150,7 @@ def main() -> int:
     if artifact.final_text and artifact.stop_reason and artifact.stop_reason.value == "NO_FUNCTION_CALL":
         print(f"{BOLD}final text{RESET}  {artifact.final_text[:300]}")
 
-    out_dir = attempt_dir(artifact.attempt_id, artifact.job_id)
+    out_dir = executor.attempt_dir(artifact.attempt_id, artifact.job_id)
     print()
     print(f"{BOLD}artifacts{RESET}   {out_dir}")
     print(f"            {DIM}artifact.json, evaluation.json, steps/*.png, worker.log{RESET}")

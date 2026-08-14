@@ -31,7 +31,8 @@ import pathlib
 import time
 from typing import Any, Callable
 
-from .. import vendor  # noqa: F401  -- puts the vendored clone on sys.path
+# Constants and a base class we subclass, so imported directly. sys.path is set up by
+# rlgym/__init__.py, so these no longer depend on import order.
 from agent import (  # type: ignore[import-not-found]
     LEGACY_COMPUTER_USE_MODELS,
     LEGACY_PREDEFINED_COMPUTER_USE_FUNCTIONS,
