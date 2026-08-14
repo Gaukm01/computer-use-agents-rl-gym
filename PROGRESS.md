@@ -697,7 +697,96 @@ agent/.venv/bin/python -m rlgym.run_one --task problem1 --headed    # watch it w
 Artifacts land in `runs/adhoc/<attempt_id>/` — `artifact.json`, `evaluation.json`,
 `steps/*.png`, `video/*.webm`, `worker.log`.
 
-### Not built yet
+### Not built yet (at the time of Milestone 1)
 
 Job runner (T×K, parallel, resumable), FastAPI + React UI, reset-between-rollouts
 (unnecessary today — all 10 tasks are read-only), and the Milestone 3 write-up.
+
+---
+
+# Phase 4: Milestone 2 — Rollout Platform Backend
+
+## Status: ✅ Backend complete — stopping before the HTTP API and frontend
+
+Parallel T×K jobs run, aggregate, persist and resume. 62 tests pass. The service layer is
+in place for the API to sit on, but no HTTP routes or UI exist yet, by agreement.
+
+### What was built
+
+| File | Role |
+|---|---|
+| `rlgym/orchestrator.py` | T tasks × K attempts: thread pool, attempt-major ordering, resume, pass@k |
+| `rlgym/service.py` | Platform API surface — **imports no web framework** |
+| `rlgym/scripts/run_job.py` | CLI for a whole job |
+| `rlgym/scripts/run_one.py` | Moved here from `rlgym/` — it's an ad-hoc tool |
+| `tests/test_orchestrator.py` | 18 tests, executor stubbed, no API calls |
+
+Naming: `orchestrator.py` rather than `rollout.py` because **rollout is already pinned to
+mean a single attempt** in our terminology. A `rollout.py` handling batches would overload
+the one term we defined precisely.
+
+### Verified against the live gym
+
+```
+6 real attempts, 3 tasks x 2, concurrency 3   -> COMPLETED in 16s
+   (sequential would have been ~48s)
+
+attempt start/end times, from the artifacts:
+  22:18:46.391 -> 22:18:53.483  problem10#0     <- three start together
+  22:18:46.392 -> 22:18:53.934  problem5#0
+  22:18:46.392 -> 22:18:54.235  problem6#0
+  22:18:53.752 -> 22:19:00.239  problem10#1     <- next three as slots free
+  22:18:54.161 -> 22:19:01.349  problem5#1
+  22:18:54.534 -> 22:19:02.235  problem6#1
+
+resume of a completed job                     -> re-ran nothing, 0.16s
+background submit (how the API will call it)  -> returns RUNNING immediately,
+                                                 job.json polls to COMPLETED
+```
+
+That timing also confirms **attempt-major ordering** — every task's attempt 0 completes
+before any task's attempt 1 starts.
+
+### Design points worth recording
+
+**Threads here, subprocesses underneath.** `execute_attempt()` already forks per attempt and
+blocks on it, so the pool only supervises. Threads are correct despite the GIL — parked in
+`Popen.wait()`, not computing — and Playwright never runs in the orchestrator process, which
+is the thing that would have made threads unusable.
+
+**pass@k keeps ERRORED out of the denominator.** `1 pass + 1 fail + 1 errored` reports a
+**50%** rate, not 33%. `low_confidence` flags any task whose valid attempts fell short of K,
+so a "pass@3" actually computed on n=1 cannot read as clean. Job-level `pass_at_k_rate`
+averages over graded tasks only — a task whose every attempt errored is excluded rather than
+counted as a failing task.
+
+**Jobs stream to `runs/<job_id>/job.json`** after every attempt, so a UI follows progress by
+polling one file — no websocket plumbing — and an interrupted job leaves a resumable record.
+
+**K defaults to 1** so an exploratory job is cheap; pass `--attempts 3` for pass@3.
+
+### Honest limitation
+
+The registry of *running* jobs lives in memory, so restarting the API would abandon
+in-flight jobs. Their artifacts and `job.json` survive and `resume_job()` picks them up.
+Moving that registry into a queue or DB is the Milestone 3 answer — faking durability now
+would be worse than naming the gap.
+
+### How to test it
+
+```bash
+agent/.venv/bin/python -m pytest tests/ -q                 # 62 passed
+
+# cheap end-to-end of the whole job pipeline (~1 API call per attempt)
+agent/.venv/bin/python -m rlgym.scripts.run_job \
+    --tasks problem10,problem5,problem6 --attempts 2 --concurrency 3 \
+    --max-steps 1 --timeout 120 --no-video
+
+# the real thing -- expensive: ~500k tokens and ~4-5 min PER attempt
+agent/.venv/bin/python -m rlgym.scripts.run_job --tasks problem10 --attempts 3
+```
+
+### Not built yet
+
+FastAPI routes over `service.py` (pure wiring), the React/TS frontend (UI design to be
+discussed separately), reset-between-rollouts, and the Milestone 3 write-up.

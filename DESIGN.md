@@ -120,18 +120,30 @@ milestones** — the job runner will call the same `execute_attempt()` that `run
 and the API will call the runner.
 
 ```
-tasks.json ─► Task
-                │
-                ▼
-        execute_attempt()            ONE attempt, in its own subprocess
-                │                    ├─ GymComputer   pre-auth, video, domain lock
-                │                    └─ Agent         Gemini computer-use + submit_answer
-                ▼
-        AttemptArtifact              status, steps, screenshots, video, tokens
-                │
-                ▼
-        grade()  ─► EvaluationResult verdict + reward + diff  (versioned, re-runnable)
+                    ┌──────────────────────────────────────────────┐
+   HTTP API  ─────► │ service.py    no web framework imported      │
+   (not built)      │               submit / poll / cancel / read  │
+                    └───────────────────────┬──────────────────────┘
+                                            ▼
+                    ┌──────────────────────────────────────────────┐
+                    │ orchestrator.py   T tasks × K attempts       │
+                    │   thread pool, attempt-major, resumable      │
+                    │   pass@k over VALID attempts only            │
+                    └───────────────────────┬──────────────────────┘
+                                            │  (one call per attempt)
+tasks.json ─► Task ─────────────────────────▼
+                        execute_attempt()            ONE attempt, own subprocess
+                                │                    ├─ GymComputer  pre-auth, video, lock
+                                │                    └─ Agent        Gemini + submit_answer
+                                ▼
+                        AttemptArtifact              status, steps, screenshots, tokens
+                                │
+                                ▼
+                        grade() ─► EvaluationResult  verdict + reward + diff (versioned)
 ```
+
+Every layer calls the one below it and nothing re-implements it: `scripts/run_one.py`,
+the job orchestrator, and the future API all bottom out in the same `execute_attempt()`.
 
 ### Reward derives from status, and `ERRORED` is not zero
 
@@ -201,6 +213,47 @@ pre-flight check and reported as `ERRORED` — infrastructure, not agent.
 the cookie**. Harmless now (read-only tasks, no resets); in write-mode it must be re-captured
 after each restore. Don't bake a session row into the pristine template — Metabase ages
 sessions out (~14 days) and a baked one rots silently.
+
+### Jobs, and what pass@k actually counts
+
+**Terminology**, kept precise because the words are overloaded elsewhere:
+
+| Term | Meaning |
+|---|---|
+| **Task** | A problem definition from `tasks.json`. Static, never runs. |
+| **Attempt** = **rollout** | One episode: one agent run against one task, once. The atomic unit. |
+| **Job** | A batch: T tasks × K attempts = T·K independent attempts. |
+
+`K` defaults to **1** so an exploratory job is cheap; pass 3+ for pass@k.
+
+**ERRORED attempts leave the denominator.** This is the arithmetic that keeps a job's
+headline number honest:
+
+```
+1 pass + 1 fail + 1 errored   →   pass_rate = 50%,  NOT 33%
+```
+
+Per task we report `pass_at_k` (did *any* valid attempt succeed — pass@k proper),
+`pass_rate` (passed ÷ valid), and `low_confidence` when errors left fewer valid attempts
+than requested — so a "pass@3" actually computed on n=1 can't read as clean. At job level,
+`pass_at_k_rate` averages over **graded tasks only**: a task whose every attempt errored is
+excluded rather than counted as a failing task.
+
+### Threads in the orchestrator, subprocesses underneath
+
+`execute_attempt()` already forks a subprocess and blocks waiting on it, so the pool only
+supervises. Threads are therefore correct despite the GIL — they're parked in `Popen.wait()`,
+not computing — and Playwright never runs in the orchestrator process, which is the thing
+that would have made threads unusable.
+
+Attempts are ordered **attempt-major**: every task's attempt 0 before any task's attempt 1.
+A half-finished job then has one sample of every task rather than every sample of half the
+tasks, which is far more useful to look at while it runs.
+
+Jobs stream their state to `runs/<job_id>/job.json` after every attempt, so a UI follows
+progress by polling one file — no websocket plumbing — and an interrupted job leaves a
+resumable record. Resume skips any attempt already in a terminal state, including ERRORED
+(attempt-level retry is deliberately off).
 
 ### Grader comparison rules
 
@@ -340,11 +393,18 @@ isolating "is the key live?" from "is the gym reachable?" when something breaks.
 ✅ Executor     subprocess per attempt, soft deadline + SIGKILL backstop
 ✅ Grader       pairing-aware, versioned, 44 tests passing
 ✅ End-to-end   problem10 -> COMPLETED_CORRECT, reward 1, fully visual
-⬜ Runner       no T×K orchestration or parallelism yet
-⬜ API + UI     FastAPI + React planned; UI design deferred
+✅ Orchestrator T×K in parallel, attempt-major, resumable, pass@k
+✅ Service      framework-agnostic seam the API will sit on
+✅ CLIs         scripts/run_one.py (one attempt) · scripts/run_job.py (a job)
+⬜ HTTP API     FastAPI routes over service.py -- pure wiring, not written
+⬜ Frontend     React + TS; UI design to be discussed separately
 ⬜ Reset        TEMPLATE approach decided, not implemented (unneeded: read-only tasks)
 ⬜ M3           productionization design not written
 ```
+
+**Measured job throughput:** 6 real attempts at concurrency 3 finished in 16s wall clock
+(sequential would have been ~48s), with three attempts starting simultaneously and the next
+three starting as slots freed. Resume of a completed job re-ran nothing in 0.16s.
 
 **Measured cost per attempt** (problem10, 39 steps): ~518k tokens, ~4.5 min wall clock.
 Prompt tokens dominate at ~13k/step — three 1440×900 screenshots in context. That number is

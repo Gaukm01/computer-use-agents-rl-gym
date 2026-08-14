@@ -37,9 +37,13 @@ hackathon/
 │   ├── agents/gemini_cu.py       # Gemini computer-use + submit_answer
 │   ├── executor.py               # ONE attempt in a subprocess → artifact
 │   ├── grader.py                 # versioned reward function
-│   └── run_one.py                # demo / debug CLI
-├── tests/                        # 44 tests (grader is pure; computer needs the gym)
-├── runs/                         # rollout artifacts — git-ignored
+│   ├── orchestrator.py           # T×K attempts, parallel, resumable, pass@k
+│   ├── service.py                # platform API surface (no web framework)
+│   └── scripts/
+│       ├── run_one.py            # one attempt — demo / debug
+│       └── run_job.py            # a whole job
+├── tests/                        # 62 tests (pure ones run anywhere)
+├── runs/<job_id>/                # job.json + one dir per attempt — git-ignored
 ├── resources/
 │   ├── metabase_envdata.sql      # binary PGDMP dump — THE seed data (never edit)
 │   ├── readable_metabase_envdata.sql  # plain-SQL twin, inspection only (never edit)
@@ -52,7 +56,8 @@ hackathon/
 ```
 
 **Status:** gym ✅ · agent toolchain ✅ · single attempt + grading ✅ (`problem10` passes
-end to end) · T×K job runner and UI ⬜ not built.
+end to end) · T×K parallel job orchestration + service layer ✅ · HTTP API and frontend
+⬜ not built.
 
 ---
 
@@ -491,7 +496,51 @@ Useful flags:
 **Exit code is 1 only for `ERRORED`.** A wrong answer is a valid outcome and must not look
 like a broken pipeline to a caller or CI step.
 
-### 7.6 Where artifacts land
+### 7.6 Running a job (many rollouts, in parallel)
+
+```bash
+# every task, 1 attempt each -- the cheap default
+agent/.venv/bin/python -m rlgym.scripts.run_job
+
+# pass@3 over three tasks
+agent/.venv/bin/python -m rlgym.scripts.run_job \
+    --tasks problem10,problem5,problem6 --attempts 3 --concurrency 3
+
+# cheap smoke test of the whole pipeline: ~1 API call per attempt
+agent/.venv/bin/python -m rlgym.scripts.run_job \
+    --tasks problem10,problem5 --attempts 2 --max-steps 1 --no-video
+
+# continue an interrupted job -- finished attempts are NOT re-run
+agent/.venv/bin/python -m rlgym.scripts.run_job --resume job-20260815-...
+```
+
+| Flag | Effect |
+|---|---|
+| `--tasks a,b,c` | Which tasks. Default: all 10. |
+| `--attempts K` | Attempts per task. **Default 1**; use 3+ for pass@k. |
+| `--concurrency N` | Parallel attempts, default 3. Bounded by API rate limits, not RAM. |
+| `--resume JOB_ID` | Continue a job; terminal attempts are skipped. |
+| `--max-steps` / `--timeout` | Per-attempt budgets, as for a single run. |
+
+⚠️ **Cost.** A real attempt is ~500k tokens and ~4–5 min. All 10 tasks × 3 attempts is
+~15M tokens and roughly 40 min at concurrency 3. Use `--max-steps 1` when testing plumbing.
+
+Exit code is non-zero only if the *orchestrator* failed. Tasks failing is a valid result.
+
+### 7.7 Job artifacts
+
+```
+runs/<job_id>/
+├── job.json                    live job state -- rewritten after every attempt
+└── <attempt_id>/               one directory per attempt (same layout as §7.8 below)
+```
+
+`job.json` is the polling surface: a UI reads it on an interval to follow a running job. It
+carries per-task aggregates (`passed`/`failed`/`errored`, `pass_at_k`, `pass_rate`,
+`low_confidence`) plus a compact `AttemptSummary` per attempt. Full trajectories stay in the
+per-attempt `artifact.json` and are fetched only when someone opens one.
+
+### 7.8 Where attempt artifacts land
 
 ```
 runs/<job_id or "adhoc">/<attempt_id>/
@@ -506,7 +555,7 @@ runs/<job_id or "adhoc">/<attempt_id>/
 `artifact.json` is rewritten after **every step**, so a killed attempt keeps its partial
 trajectory and a UI can follow a run live.
 
-### 7.7 Attempt failure modes and what they mean
+### 7.9 Attempt failure modes and what they mean
 
 | Status | Meaning | What to do |
 |---|---|---|
@@ -526,7 +575,7 @@ Common `ERRORED` causes, all verified:
 "worker produced no artifact"                       -> read worker.log; usually an import error
 ```
 
-### 7.8 Tests
+### 7.10 Tests
 
 ```bash
 agent/.venv/bin/python -m pytest tests/ -q          # 44 tests
@@ -536,7 +585,30 @@ agent/.venv/bin/python -m pytest tests/ -q          # 44 tests
 gym plus a captured cookie and **skips cleanly** without them, so the suite stays green on a
 fresh checkout.
 
-### 7.9 Still unwired ⬜
+### 7.11 The service layer (what the HTTP API will call)
+
+`rlgym/service.py` imports no web framework on purpose, so the API becomes pure wiring and
+the same functions stay usable from a CLI, a notebook or a test.
+
+| Function | Purpose |
+|---|---|
+| `list_tasks()` / `get_task(id)` | Ingest `tasks.json` for the task picker |
+| `submit_job(task_ids, attempts_per_task, concurrency, ...)` | Start a job; returns immediately unless `block=True` |
+| `get_job(job_id)` / `list_jobs()` | Poll state; newest first |
+| `resume_job(job_id)` | Continue after an interruption |
+| `cancel_job(job_id)` / `is_running(job_id)` | Stop scheduling new attempts |
+| `get_attempt(job_id, attempt_id)` | Full trajectory + verdict + media paths |
+| `attempt_screenshots` / `attempt_video` / `attempt_file` | Media for the transcript viewer |
+
+`attempt_file()` rejects path traversal in the service rather than at the route, so every
+caller is protected rather than each endpoint having to remember.
+
+**Known limitation, deliberate:** the registry of *running* jobs is in memory, so restarting
+the API abandons in-flight jobs. Artifacts and `job.json` survive and `resume_job()` picks
+them up. Moving that registry to a queue or DB is the Milestone 3 answer, not something to
+fake now.
+
+### 7.12 Still unwired ⬜
 
 - **Job runner**: T×K attempts in parallel with resume. `execute_attempt()` is already the
   atomic unit it will call, so this adds orchestration only.
