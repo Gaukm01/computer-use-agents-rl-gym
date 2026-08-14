@@ -229,6 +229,160 @@ class AttemptArtifact(BaseModel):
         return reward_for_status(self.status)
 
 
+class JobStatus(str, Enum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+    # The orchestrator itself failed, as distinct from its attempts failing.
+    FAILED = "FAILED"
+
+
+class JobSpec(BaseModel):
+    """The request: T tasks x K attempts, and how to run them."""
+
+    job_id: str
+    task_ids: list[str] = Field(default_factory=list)
+    tasks_file: str | None = None
+
+    # Defaults to 1 so an exploratory job is cheap; pass 3+ for pass@k.
+    attempts_per_task: int = 1
+
+    # Bounded by one API key's rate limits, not by RAM. Each attempt is its own
+    # subprocess, and the browser runs host-side, so memory stays flat as this grows.
+    concurrency: int = 3
+
+    agent_config: AgentConfig = Field(default_factory=AgentConfig)
+    limits: Limits = Field(default_factory=Limits)
+    gym_url: str = "http://localhost:3000"
+
+    headless: bool = True
+    record_video: bool = True
+
+    created_at: datetime | None = None
+
+    @property
+    def total_attempts(self) -> int:
+        return len(self.task_ids) * self.attempts_per_task
+
+
+class AttemptSummary(BaseModel):
+    """A row in the UI's attempt list. Deliberately small -- the full trajectory stays
+    in artifact.json and is fetched only when someone opens one attempt."""
+
+    attempt_id: str
+    task_id: str
+    attempt_index: int
+
+    status: AttemptStatus
+    reward: int | None = None
+    verdict: str | None = None
+    near_miss: bool = False
+
+    step_count: int = 0
+    duration_s: float | None = None
+    total_tokens: int = 0
+    used_sql_editor: bool = False
+
+    error: str | None = None
+    diff: str | None = None
+
+    has_video: bool = False
+    screenshot_count: int = 0
+
+
+class TaskResult(BaseModel):
+    """Aggregate over one task's K attempts."""
+
+    task_id: str
+    prompt: str | None = None
+    expected_output: Any | None = None
+
+    attempts: list[AttemptSummary] = Field(default_factory=list)
+
+    total_attempts: int = 0
+    # Attempts whose outcome was actually observed. ERRORED ones are excluded rather
+    # than counted as failures -- see reward_for_status.
+    valid_attempts: int = 0
+    passed: int = 0
+    failed: int = 0
+    errored: int = 0
+
+    # pass@k proper: did ANY valid attempt succeed?
+    pass_at_k: bool = False
+    # Per-attempt success rate over valid attempts only. None when nothing was observed.
+    pass_rate: float | None = None
+
+    # True when errors ate some attempts, so pass@k rests on fewer samples than
+    # requested. Surfaced so a pass@3 computed on n=1 can't look clean.
+    low_confidence: bool = False
+
+    def recompute(self, requested_attempts: int) -> None:
+        self.total_attempts = len(self.attempts)
+        self.passed = sum(1 for a in self.attempts if a.reward == 1)
+        self.failed = sum(1 for a in self.attempts if a.reward == 0)
+        self.errored = sum(1 for a in self.attempts if a.reward is None)
+        self.valid_attempts = self.passed + self.failed
+        self.pass_at_k = self.passed > 0
+        self.pass_rate = (
+            self.passed / self.valid_attempts if self.valid_attempts else None
+        )
+        self.low_confidence = self.valid_attempts < requested_attempts
+
+
+class JobResult(BaseModel):
+    """Live state of a job. Rewritten to runs/<job_id>/job.json as attempts finish, so
+    the API can poll it and a crashed orchestrator leaves a resumable record."""
+
+    spec: JobSpec
+    status: JobStatus = JobStatus.QUEUED
+
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    duration_s: float | None = None
+
+    tasks: list[TaskResult] = Field(default_factory=list)
+
+    total_attempts: int = 0
+    completed_attempts: int = 0
+    valid_attempts: int = 0
+    passed: int = 0
+    failed: int = 0
+    errored: int = 0
+
+    # Fraction of TASKS with at least one passing attempt -- the headline number.
+    pass_at_k_rate: float | None = None
+    # Mean reward over valid attempts only.
+    mean_reward: float | None = None
+
+    total_tokens: int = 0
+    error: str | None = None
+
+    def recompute(self) -> None:
+        for task in self.tasks:
+            task.recompute(self.spec.attempts_per_task)
+
+        self.total_attempts = self.spec.total_attempts
+        self.completed_attempts = sum(t.total_attempts for t in self.tasks)
+        self.passed = sum(t.passed for t in self.tasks)
+        self.failed = sum(t.failed for t in self.tasks)
+        self.errored = sum(t.errored for t in self.tasks)
+        self.valid_attempts = self.passed + self.failed
+        self.total_tokens = sum(
+            a.total_tokens for t in self.tasks for a in t.attempts
+        )
+
+        graded_tasks = [t for t in self.tasks if t.valid_attempts > 0]
+        self.pass_at_k_rate = (
+            sum(1 for t in graded_tasks if t.pass_at_k) / len(graded_tasks)
+            if graded_tasks
+            else None
+        )
+        self.mean_reward = (
+            self.passed / self.valid_attempts if self.valid_attempts else None
+        )
+
+
 class EvaluationResult(BaseModel):
     """Grading verdict, stored separately so trajectories can be re-graded later.
 

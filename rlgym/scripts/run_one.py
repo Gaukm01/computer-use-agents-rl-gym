@@ -8,8 +8,8 @@ is what a rollout does, minus the batching.
     colima start && (cd metabase && docker compose up -d)
     agent/.venv/bin/python -m rlgym.capture_auth        # once, mints the auth cookie
 
-    agent/.venv/bin/python -m rlgym.run_one --task problem10
-    agent/.venv/bin/python -m rlgym.run_one --task problem1 --headed --max-steps 40
+    agent/.venv/bin/python -m rlgym.scripts.run_one --task problem10
+    agent/.venv/bin/python -m rlgym.scripts.run_one --task problem1 --headed --max-steps 40
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ import sys
 from dotenv import load_dotenv
 
 # Modules for behaviour, types direct.
-from . import executor, tasks, vendor
-from .schemas import AgentConfig, AttemptStatus, Limits
+from .. import executor, tasks, vendor
+from ..schemas import AgentConfig, AttemptStatus, Limits
 
 load_dotenv(vendor.PROJECT_ROOT / ".env")
 
