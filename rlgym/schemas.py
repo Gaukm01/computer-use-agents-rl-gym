@@ -162,6 +162,13 @@ class StepRecord(BaseModel):
     refused: bool = False
     refused_reason: str | None = None
 
+    # The model asked for confirmation on a flagged action. Unattended rollouts cannot
+    # block on a human (upstream calls input() here), so it is auto-acknowledged and
+    # recorded. Surfaced explicitly because auto-approving a safety check is a policy
+    # choice, not an implementation detail to bury.
+    safety_acknowledged: bool = False
+    safety_explanation: str | None = None
+
     latency_ms: int = 0
     tokens: TokenUsage | None = None
 
@@ -206,6 +213,11 @@ class AttemptArtifact(BaseModel):
     # Strategy logging: did the agent reach for the native SQL editor rather than the
     # query builder? Not a restriction -- just lets pass rates be split by approach.
     used_sql_editor: bool = False
+
+    # Actions the domain lock or prohibited_actions refused, and safety confirmations
+    # auto-acknowledged. Both are counted so a run's behaviour is auditable.
+    refusals: list[str] = Field(default_factory=list)
+    safety_acknowledgements: int = 0
 
     # Kept for symmetry with the retry knob. Attempt-level retry is off by default:
     # transient 429s are already absorbed by the SDK's internal backoff, and k attempts

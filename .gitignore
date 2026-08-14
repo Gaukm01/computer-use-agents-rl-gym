@@ -13,3 +13,12 @@ agent/computer-use-preview/
 
 # Verification artifacts / screenshots
 agent/artifacts/
+
+# Auth cookie minted by rlgym/capture_auth.py — a live session, treat as a secret
+agent/storage_state.json
+
+# Rollout artifacts: trajectories, screenshots, videos
+runs/
+
+# pytest
+.pytest_cache/

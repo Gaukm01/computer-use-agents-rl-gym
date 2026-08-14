@@ -25,6 +25,9 @@ if not VENDOR_REPO.is_dir():
     )
 
 if str(VENDOR_REPO) not in sys.path:
-    # Appended rather than prepended: the clone contains a top-level `agent.py`, and
-    # prepending would let it shadow our own `rlgym.agents` package on some import paths.
-    sys.path.append(str(VENDOR_REPO))
+    # MUST be prepended, not appended. The project root is normally first on sys.path and
+    # contains an `agent/` directory with no __init__.py, which Python treats as a namespace
+    # package (PEP 420). That would shadow the vendored `agent.py` and make
+    # `from agent import BrowserAgent` fail with a confusing ImportError. Prepending the
+    # clone means the real module wins.
+    sys.path.insert(0, str(VENDOR_REPO))
