@@ -24,6 +24,9 @@ VENDOR_REPO = PROJECT_ROOT / "agent" / "computer-use-preview"
 RUNS_DIR = PROJECT_ROOT / "runs"
 TASKS_FILE = PROJECT_ROOT / "resources" / "tasks.json"
 STORAGE_STATE = PROJECT_ROOT / "agent" / "storage_state.json"
+# Task files uploaded through the UI. Kept out of resources/ so the pristine tasks.json
+# is never overwritten by an upload.
+UPLOADS_DIR = PROJECT_ROOT / "uploads"
 
 CLONE_HINT = (
     f"Vendored repo missing at {VENDOR_REPO}.\n"

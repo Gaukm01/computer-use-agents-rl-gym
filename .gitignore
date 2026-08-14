@@ -22,3 +22,8 @@ runs/
 
 # pytest
 .pytest_cache/
+uploads/
+
+# Frontend build output and deps
+web/node_modules/
+web/dist/

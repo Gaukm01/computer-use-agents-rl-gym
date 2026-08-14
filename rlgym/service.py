@@ -16,8 +16,10 @@ is the Milestone 3 answer, not something to fake here.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from . import executor, orchestrator, tasks as tasks_module, vendor
@@ -57,6 +59,66 @@ def list_tasks(tasks_file: str | pathlib.Path | None = None) -> list[Task]:
 
 def get_task(task_id: str, tasks_file: str | pathlib.Path | None = None) -> Task | None:
     return tasks_module.load_task_map(tasks_file).get(task_id)
+
+
+def save_tasks_file(content: bytes | str, filename: str = "tasks.json") -> tuple[pathlib.Path, list[Task]]:
+    """Validate an uploaded task file and store it, returning its path and parsed tasks.
+
+    Written to uploads/ rather than over resources/tasks.json, so the pristine file can
+    never be clobbered by an upload. The returned path is what a job's spec records, so
+    an uploaded file genuinely drives the run rather than only the display.
+
+    Validation happens before the file is written: a bad upload fails immediately with a
+    useful message instead of surfacing later as a confusing job failure.
+    """
+    text = content.decode("utf-8") if isinstance(content, bytes) else content
+
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"not valid JSON: {exc}") from exc
+
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"expected a JSON array of tasks, got {type(raw).__name__}"
+        )
+    if not raw:
+        raise ValueError("task file is empty")
+
+    tasks: list[Task] = []
+    seen: set[str] = set()
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"task {i} is {type(entry).__name__}, expected an object")
+        missing = [k for k in ("id", "task", "answer") if k not in entry]
+        if missing:
+            raise ValueError(
+                f"task {i} is missing required field(s): {', '.join(missing)}"
+            )
+        try:
+            task = Task.model_validate(entry)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"task {i} ({entry.get('id')!r}) is invalid: {exc}") from exc
+        # The answer is a JSON *string*; catching a bad one here beats discovering it
+        # after an expensive run has already finished.
+        try:
+            task.expected_output()
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f"task {task.id!r}: 'answer' must be a JSON string, but failed to parse: {exc}"
+            ) from exc
+        if task.id in seen:
+            raise ValueError(f"duplicate task id {task.id!r}")
+        seen.add(task.id)
+        tasks.append(task)
+
+    vendor.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    stem = pathlib.Path(filename).stem or "tasks"
+    safe = "".join(c for c in stem if c.isalnum() or c in "-_")[:40] or "tasks"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = vendor.UPLOADS_DIR / f"{safe}-{stamp}.json"
+    path.write_text(text)
+    return path, tasks
 
 
 # ======================================================================================
