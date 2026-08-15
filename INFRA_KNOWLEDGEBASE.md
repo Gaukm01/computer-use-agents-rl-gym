@@ -1,7 +1,7 @@
 # Infra Knowledgebase
 
 > **Looking for the short version?** Read [`DESIGN.md`](./DESIGN.md) instead — architecture,
-> design decisions, open questions, and a condensed setup, in about ten minutes.
+> design decisions, and a condensed setup, in about ten minutes.
 > **This file is the exhaustive reference**: every command, version, and gotcha. Come here
 > when something breaks, when you need an exact command, or to rebuild from a clean machine.
 
@@ -42,22 +42,32 @@ hackathon/
 │   └── scripts/
 │       ├── run_one.py            # one attempt — demo / debug
 │       └── run_job.py            # a whole job
+├── server/
+│   └── app.py                    # FastAPI routes — thin wrappers over service.py
+├── web/                          # React + TS eval console (Vite)
+│   ├── src/NewRun.tsx            # upload tasks, pick tasks, set K, launch
+│   ├── src/JobView.tsx           # job stats, task cards, attempt chips
+│   ├── src/Transcript.tsx        # grade panel, per-step slides, video
+│   ├── node_modules/ dist/       # git-ignored
+│   └── package.json
 ├── tests/                        # 62 tests (pure ones run anywhere)
 ├── runs/<job_id>/                # job.json + one dir per attempt — git-ignored
+├── uploads/                      # task files uploaded via the UI — git-ignored
 ├── resources/
 │   ├── metabase_envdata.sql      # binary PGDMP dump — THE seed data (never edit)
 │   ├── readable_metabase_envdata.sql  # plain-SQL twin, inspection only (never edit)
 │   └── tasks.json                # 10 tasks: prompt + expected answer
+├── requirements.txt              # platform deps (fastapi, uvicorn, multipart)
 ├── .env                          # secrets — git-ignored, never commit
 ├── .gitignore
 ├── DESIGN.md                     # architecture + decisions (start here)
-├── PROGRESS.md                   # chronological log, Phases 1–3
+├── PROGRESS.md                   # chronological log, Phases 1–5
 └── INFRA_KNOWLEDGEBASE.md        # this file
 ```
 
-**Status:** gym ✅ · agent toolchain ✅ · single attempt + grading ✅ (`problem10` passes
-end to end) · T×K parallel job orchestration + service layer ✅ · HTTP API and frontend
-⬜ not built.
+**Status:** gym ✅ · agent toolchain ✅ · single attempt + grading ✅ · T×K parallel
+orchestration ✅ · HTTP API + web console ✅ (Milestone 2 complete) ·
+reset-between-rollouts and the Milestone 3 write-up ⬜ not built.
 
 ---
 
@@ -578,14 +588,14 @@ Common `ERRORED` causes, all verified:
 ### 7.10 Tests
 
 ```bash
-agent/.venv/bin/python -m pytest tests/ -q          # 44 tests
+agent/.venv/bin/python -m pytest tests/ -q          # 62 tests
 ```
 
 `tests/test_grader.py` is pure logic and runs anywhere. `tests/test_computer.py` needs the
 gym plus a captured cookie and **skips cleanly** without them, so the suite stays green on a
 fresh checkout.
 
-### 7.11 The service layer (what the HTTP API will call)
+### 7.11 The service layer (what the HTTP API calls)
 
 `rlgym/service.py` imports no web framework on purpose, so the API becomes pure wiring and
 the same functions stay usable from a CLI, a notebook or a test.

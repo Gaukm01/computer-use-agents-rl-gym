@@ -1,7 +1,11 @@
 # Design & Setup — Metabase Computer-Use RL Environment
 
-Short technical overview: what we're building, how the pieces fit, what's decided, and what
-still needs your call. Read this one first.
+Short technical overview: what we're building, how the pieces fit, and why each choice was
+made. Read this one first.
+
+**Status: Milestones 1 and 2 are complete.** The gym runs, the agent solves tasks visually,
+jobs run in parallel with pass@k grading, and a web console drives the whole thing.
+Milestone 3 (productionization design) is not started.
 
 - **This doc** — architecture, design decisions, condensed setup. ~10 min read.
 - `INFRA_KNOWLEDGEBASE.md` — exhaustive reference. Every command, version, and gotcha.
@@ -22,7 +26,7 @@ Three parts, built in order:
 |---|---|---|
 | **Gym** | Metabase + a realistic seeded environment (dashboards, questions, users) | ✅ done |
 | **Agent** | Gemini computer-use driving a real browser against the gym | ✅ done — `problem10` passes end to end |
-| **Rollout infra** | Task definitions, resets, grading, running many attempts | 🟡 one attempt + grading done; T×K runner and UI not built |
+| **Rollout infra** | Task definitions, grading, running many attempts, the console | ✅ done — parallel jobs, pass@k, web UI. Reset-between-rollouts still unbuilt (unneeded while tasks are read-only) |
 
 **The one hard constraint: visual only.** The agent sees screenshots and emits clicks and
 keystrokes. No REST API calls, no SQL, no DOM inspection. If something looks easier via API,
@@ -107,9 +111,11 @@ the dashboards query the sample dataset that ships in the image.
 | Restore method | **in-container `pg_restore`** | Host client is 18.4 vs 16.9 server → emits a PG17-only setting and logs a spurious error |
 | Agent runtime | **Python 3.12** | Repo's CI is 3.10/3.11/3.x; system Python is 3.9.6 |
 | Browser harness | **the repo's own Playwright impl** | `computer-use-preview` ships a complete one — nothing to build |
-| Agent auth | **real admin creds, typed visually** | Simple; the per-rollout reset bounds the blast radius of admin rights |
-| Reset strategy | **Postgres `TEMPLATE`** | Restore once, then `CREATE DATABASE … TEMPLATE pristine` per rollout |
+| Agent auth | **pre-authenticated via `storage_state`** | Superseded the original "type the admin password" plan during M1. Login is a confound and a step tax, so the cookie is injected per context — the password never reaches model context or a transcript. §3b |
+| Reset strategy | **Postgres `TEMPLATE`** | Decided, **not implemented** — genuinely unnecessary while every task is read-only |
 | Browser lifecycle | **fresh browser per attempt** | Zero state leakage; needs no changes to the repo's harness |
+| Job orchestration | **threads over subprocesses** | `execute_attempt()` already forks and blocks, so the pool only supervises — and Playwright's sync API can't be threaded |
+| Backend | **FastAPI over a framework-free service layer** | Routes stay pure wiring; the same functions work from a CLI or a test |
 
 ---
 
@@ -117,7 +123,7 @@ the dashboards query the sample dataset that ships in the image.
 
 Each layer is the atomic unit for the one above. **Nothing is rewritten between
 milestones** — the orchestrator calls the same `execute_attempt()` that `run_one` calls, and
-the API will call the orchestrator through `service.py`.
+and the API calls the orchestrator through `service.py`.
 
 ```
    web/ (React+TS) ──► server/app.py  thin routes, no logic
@@ -274,37 +280,48 @@ flagged for review rather than trusted as clean agent failures.
 
 ---
 
-## 4. Open questions — where your input actually matters
+## 4. Questions that shaped the build — and how they were answered
 
-These are unresolved and shape the build. Nothing here is decided.
+These were the open questions before Milestone 1. All six are now settled by working code,
+so they're recorded here as decisions rather than as things awaiting input.
 
-**1. What is a task, and how do we grade it?** The biggest open question by far. A task needs
-a goal the agent can pursue visually *and* a success check we can run afterwards. The natural
-check is SQL against Postgres after the rollout ("does a card named X now exist in collection
-Y?") — that's grading infrastructure, not agent behaviour, so it doesn't violate visual-only.
-Open: do we grade final state only, or also the path taken? `resources/tasks.json` exists but
-is untouched and unscoped.
+**1. What is a task, and how do we grade it?** A task is `{id, task, answer}` from
+`tasks.json`, with `answer` a JSON string. Grading compares final state only, not the path
+taken — `grader.py` normalizes both sides and compares with tolerance, order-insensitivity
+for sets, and pairing enforcement for parallel arrays. It's a pure function with an
+`EVALUATOR_VERSION`, so stored trajectories can be re-graded after the rules change.
 
-**2. How do we know a rollout actually failed?** The repo's loop returns `COMPLETE` both when
-the model finishes *and* when the API errors out after retries. Any grading layer must treat
-"loop ended" as meaningless on its own and judge from observed state.
+**2. How do we know a rollout actually failed?** By status, never by "the loop ended".
+`ERRORED` (infra) is separated from `COMPLETED_INCORRECT`, `MAX_STEPS_EXCEEDED` and
+`TIMED_OUT` (agent), and only the latter three score 0. Upstream's habit of returning
+`COMPLETE` on API failure is fixed at the source in our loop.
 
-**3. Step cap and timeout.** The upstream loop is `while CONTINUE` with no limit. What's the
-budget — 20 steps? 50? Wall-clock too? This directly affects cost per rollout.
+**3. Step cap and timeout.** 40 steps / 600s per attempt, overridable per task and per run.
+The agent honours a soft deadline so it exits cleanly and flushes its video; the subprocess
+SIGKILL is only a backstop.
 
-**4. Unattended safety confirmations.** Some actions come back flagged `require_confirmation`,
-and the repo blocks on `input()`. For batch runs we must auto-approve, auto-deny, or abort
-the rollout. Auto-approving is a real (if small) policy decision — your call.
+**4. Unattended safety confirmations.** Auto-acknowledged and **counted** on the artifact
+(`safety_acknowledgements`) and per step. Upstream blocks on `input()`, which would hang a
+batch run. Auto-approving is a policy choice, so it's recorded rather than hidden.
 
-**5. What the model gets as observation.** Currently screenshot + URL, with only the last 3
-turns' images retained. Do we keep that, or give it more/less history? Affects both cost and
-capability.
+**5. What the model gets as observation.** Screenshot + URL + `steps_remaining`, with images
+retained for the last 3 turns. `steps_remaining` was added after watching an agent burn 28
+steps unable to decide whether a displayed value was rounded — it could not see its budget
+draining.
 
-**6. Rollout parallelism.** One gym on port 3000 means one rollout at a time. Running N in
-parallel needs N Metabase+Postgres pairs on different ports — decide before writing the
-runner, since it changes its shape.
+**6. Rollout parallelism.** One shared gym, one isolated browser per attempt, default
+concurrency 3 — bounded by API rate limits, not memory. Correct today because every task is
+read-only.
 
----
+### Still genuinely open
+
+- **Write-mode isolation.** The moment a task mutates state, the shared gym stops being
+  safe: each attempt needs its own database (§8.2) and the Metabase restart becomes the
+  throughput ceiling. Designed, not built.
+- **Durable job state.** The registry of *running* jobs is in memory, so restarting the API
+  abandons in-flight jobs (their artifacts survive and `resume_job()` recovers them).
+- **Cost.** ~500k tokens per full attempt, dominated by three screenshots per step in
+  context. The levers are retained-screenshot count and viewport size.
 
 ## 5. Setup from scratch
 
@@ -330,15 +347,30 @@ docker compose up -d metabase
 
 # 5. Agent environment
 cd ../agent
+git clone --depth 1 https://github.com/google-gemini/computer-use-preview.git
 /opt/homebrew/bin/python3.12 -m venv .venv
 ./.venv/bin/pip install -r computer-use-preview/requirements.txt
 ./.venv/bin/playwright install chromium
+cd ..
+agent/.venv/bin/pip install -r requirements.txt      # fastapi, uvicorn, multipart
 
 # 6. Secrets — put GEMINI_API_KEY in hackathon/.env
 #    Leave VERTEXAI_PROJECT and VERTEXAI_LOCATION EMPTY (see traps below)
+
+# 7. Mint the auth cookie (once; re-run if the session expires)
+agent/.venv/bin/python -m rlgym.capture_auth
+
+# 8. Build the web console. Node 18+ required — the default node here is v14,
+#    which Vite cannot run.
+export PATH="$HOME/.nvm/versions/node/v18.20.8/bin:$PATH"
+cd web && npm install && npm run build && cd ..
+
+# 9. Start the platform (serves the API and the built UI from one process)
+agent/.venv/bin/uvicorn server.app:app --port 8000
 ```
 
-Then open http://localhost:3000 → log in as `daksh@deeptune.com` / `Daksh@123`.
+Then open **http://localhost:8000** for the eval console, or http://localhost:3000 to poke
+at Metabase directly (`daksh@deeptune.com` / `Daksh@123`).
 
 ---
 
@@ -395,13 +427,14 @@ isolating "is the key live?" from "is the gym reachable?" when something breaks.
 ✅ Agent loop   our own -- step cap, no input() hang, API errors surfaced
 ✅ submit_answer  explicit answer channel, terminates the episode
 ✅ Executor     subprocess per attempt, soft deadline + SIGKILL backstop
-✅ Grader       pairing-aware, versioned, 44 tests passing
+✅ Grader       pairing-aware, versioned
 ✅ End-to-end   problem10 -> COMPLETED_CORRECT, reward 1, fully visual
 ✅ Orchestrator T×K in parallel, attempt-major, resumable, pass@k
-✅ Service      framework-agnostic seam the API will sit on
+✅ Service      framework-agnostic seam the API sits on
 ✅ CLIs         scripts/run_one.py (one attempt) · scripts/run_job.py (a job)
 ✅ HTTP API     FastAPI over service.py; /docs for the interactive spec
 ✅ Frontend     React + TS eval console -- upload tasks, set K, view transcripts
+✅ Tests        62 passing (grader pure; gym/browser tests skip cleanly)
 ⬜ Reset        TEMPLATE approach decided, not implemented (unneeded: read-only tasks)
 ⬜ M3           productionization design not written
 ```
