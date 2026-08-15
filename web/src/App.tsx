@@ -36,14 +36,30 @@ export function App() {
         </div>
         <div className="spacer" />
         {/* The two setup failures that make every run fail. Shown up front so nobody
-            debugs a failed job when the real problem is that the gym is down. */}
+            debugs a failed job when the real problem is that the gym is down.
+            Auth has three states on purpose: a cookie that exists but no longer works
+            must not look healthy, and "couldn't check" is not the same as "broken". */}
         {health && (
           <>
             <span className={`pill ${health.gym_reachable ? "pill-pass" : "pill-fail"}`}>
               gym {health.gym_reachable ? "up" : "unreachable"}
             </span>
-            <span className={`pill ${health.auth_captured ? "pill-pass" : "pill-fail"}`}>
-              auth {health.auth_captured ? "captured" : "missing"}
+            <span
+              className={`pill ${
+                health.auth_valid === true
+                  ? "pill-pass"
+                  : health.auth_valid === false
+                    ? "pill-fail"
+                    : "pill-warn"
+              }`}
+              title={health.auth_detail ?? undefined}
+            >
+              auth{" "}
+              {health.auth_valid === true
+                ? "valid"
+                : health.auth_valid === false
+                  ? "invalid"
+                  : "unknown"}
             </span>
           </>
         )}
@@ -57,13 +73,13 @@ export function App() {
             <span className="mono">cd metabase &amp;&amp; docker compose up -d</span>.
           </div>
         )}
-        {health && !health.auth_captured && (
+        {health && health.gym_reachable && health.auth_valid === false && (
           <div className="error-box">
-            No auth cookie captured, so every attempt will report ERRORED. Run{" "}
-            <span className="mono">
+            <b>Auth will not work — every attempt would report ERRORED.</b>
+            <div style={{ marginTop: 4 }}>{health.auth_detail}</div>
+            <div style={{ marginTop: 6 }} className="mono">
               agent/.venv/bin/python -m rlgym.capture_auth
-            </span>
-            .
+            </div>
           </div>
         )}
 

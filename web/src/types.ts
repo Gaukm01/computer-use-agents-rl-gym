@@ -139,6 +139,11 @@ export interface AttemptDetail {
 export interface Health {
   ok: boolean;
   gym_reachable: boolean;
+  /** The cookie file exists. Says nothing about whether it still works. */
   auth_captured: boolean;
+  /** The cookie actually authenticates. null = couldn't check (usually the gym is down). */
+  auth_valid: boolean | null;
+  /** Logged-in account when healthy, otherwise why the check failed. */
+  auth_detail: string | null;
   tasks_available: number;
 }

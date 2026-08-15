@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rlgym import service, vendor
-from rlgym.schemas import JobResult, Task
+from rlgym.schemas import HealthStatus, JobResult, Task
 
 app = FastAPI(
     title="Metabase Computer-Use RL Gym",
@@ -72,44 +72,21 @@ class UploadTasksResponse(BaseModel):
     tasks: list[Task]
 
 
-class HealthResponse(BaseModel):
-    ok: bool
-    gym_reachable: bool
-    auth_captured: bool
-    tasks_available: int
-
-
 # ======================================================================================
 # Health
 # ======================================================================================
 
 
-@app.get("/api/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    """Surfaces the two things that make every run fail if missing: the gym being down
-    and the auth cookie not being captured. The UI shows these up front so a user isn't
-    debugging a failed job when the real problem is setup."""
-    import urllib.error
-    import urllib.request
+@app.get("/api/health", response_model=HealthStatus)
+def health(gym_url: str = service.DEFAULT_GYM_URL) -> HealthStatus:
+    """The two things that make every run fail: the gym being down, and the auth cookie
+    not working. Surfaced up front so nobody debugs a failed job when the real problem is
+    setup.
 
-    gym_reachable = False
-    try:
-        with urllib.request.urlopen("http://localhost:3000/api/health", timeout=2) as r:
-            gym_reachable = r.status == 200
-    except (urllib.error.URLError, OSError):
-        gym_reachable = False
-
-    try:
-        count = len(service.list_tasks())
-    except Exception:
-        count = 0
-
-    return HealthResponse(
-        ok=True,
-        gym_reachable=gym_reachable,
-        auth_captured=vendor.STORAGE_STATE.is_file(),
-        tasks_available=count,
-    )
+    Note `auth_valid` is checked by actually using the cookie, not by checking the file
+    exists — an expired session used to report healthy and then error every attempt.
+    """
+    return service.health(gym_url)
 
 
 # ======================================================================================

@@ -229,6 +229,31 @@ class AttemptArtifact(BaseModel):
         return reward_for_status(self.status)
 
 
+class HealthStatus(BaseModel):
+    """Whether the platform can actually run anything right now.
+
+    `auth_captured` (the cookie file exists) is deliberately separate from `auth_valid`
+    (the cookie still authenticates). Reporting only the former is worse than useless: an
+    expired session shows a healthy signal and then every attempt reports ERRORED, which
+    is exactly the confusing failure the per-attempt pre-flight exists to prevent.
+
+    `auth_valid` is `None` when it could not be determined -- almost always because the
+    gym is down, in which case the cookie's state is unknowable rather than bad.
+    """
+
+    ok: bool = True
+    gym_reachable: bool
+    auth_captured: bool
+    auth_valid: bool | None = None
+    # Human-readable: the logged-in account when healthy, or why the check failed.
+    auth_detail: str | None = None
+    tasks_available: int = 0
+
+    @property
+    def can_run(self) -> bool:
+        return self.gym_reachable and self.auth_valid is True
+
+
 class JobStatus(str, Enum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"

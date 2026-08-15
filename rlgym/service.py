@@ -27,12 +27,18 @@ from .schemas import (
     AgentConfig,
     AttemptArtifact,
     EvaluationResult,
+    HealthStatus,
     JobResult,
     JobSpec,
     JobStatus,
     Limits,
     Task,
 )
+
+DEFAULT_GYM_URL = "http://localhost:3000"
+# Metabase's session cookie. The session id it holds is a row in core_session in the app
+# database, which is why any restore invalidates it.
+SESSION_COOKIE = "metabase.SESSION"
 
 
 class _RunningJob:
@@ -45,6 +51,107 @@ class _RunningJob:
 
 _running: dict[str, _RunningJob] = {}
 _registry_lock = threading.Lock()
+
+
+# ======================================================================================
+# Health
+# ======================================================================================
+
+
+def gym_reachable(gym_url: str = DEFAULT_GYM_URL, timeout: float = 2.0) -> bool:
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"{gym_url.rstrip('/')}/api/health", timeout=timeout
+        ) as response:
+            return response.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def session_token(state_path: pathlib.Path | None = None) -> str | None:
+    """Pull Metabase's session id out of the saved Playwright storage_state."""
+    path = state_path or vendor.STORAGE_STATE
+    if not path.is_file():
+        return None
+    try:
+        state = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    for cookie in state.get("cookies", []):
+        if cookie.get("name") == SESSION_COOKIE:
+            value = cookie.get("value")
+            return value if isinstance(value, str) and value else None
+    return None
+
+
+def check_auth(
+    gym_url: str = DEFAULT_GYM_URL, state_path: pathlib.Path | None = None
+) -> tuple[bool, bool | None, str | None]:
+    """Does the stored cookie still authenticate? Returns (captured, valid, detail).
+
+    Verified by *using* the cookie -- `GET /api/user/current` with it attached -- rather
+    than by checking the file exists. A one-request check costs ~50ms, where launching a
+    browser to try it would cost seconds on an endpoint the UI polls.
+
+    Hitting Metabase's REST API here does not weaken the visual-only rule: that constrains
+    the *agent*, not the harness. This is the same category as the grader querying
+    Postgres directly -- infrastructure checking itself, never the policy perceiving its
+    environment.
+    """
+    import urllib.error
+    import urllib.request
+
+    path = state_path or vendor.STORAGE_STATE
+    if not path.is_file():
+        return False, False, "no storage_state.json — run `python -m rlgym.capture_auth`"
+
+    token = session_token(path)
+    if token is None:
+        return (
+            True,
+            False,
+            f"storage_state.json has no {SESSION_COOKIE} cookie — re-run capture_auth",
+        )
+
+    request = urllib.request.Request(
+        f"{gym_url.rstrip('/')}/api/user/current",
+        headers={"Cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            body = json.loads(response.read() or b"{}")
+        who = body.get("email") or body.get("common_name") or "authenticated"
+        return True, True, f"session valid ({who})"
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return (
+                True,
+                False,
+                "session expired or invalidated — re-run `python -m rlgym.capture_auth`",
+            )
+        return True, None, f"could not verify session: HTTP {exc.code}"
+    except (urllib.error.URLError, OSError) as exc:
+        # Gym unreachable: the cookie's state is unknowable, not bad.
+        return True, None, f"could not reach the gym to verify the session ({exc})"
+
+
+def health(gym_url: str = DEFAULT_GYM_URL) -> HealthStatus:
+    reachable = gym_reachable(gym_url)
+    captured, valid, detail = check_auth(gym_url)
+    try:
+        count = len(list_tasks())
+    except Exception:  # noqa: BLE001 -- a broken task file shouldn't 500 the health check
+        count = 0
+    return HealthStatus(
+        gym_reachable=reachable,
+        auth_captured=captured,
+        auth_valid=valid,
+        auth_detail=detail,
+        tasks_available=count,
+    )
 
 
 # ======================================================================================
