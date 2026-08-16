@@ -103,6 +103,9 @@ export interface StepRecord {
   url: string | null;
   refused: boolean;
   refused_reason: string | null;
+  /** The model emitted a call the tool schema couldn't satisfy. Distinct from `refused`:
+   *  a refusal is our boundary, this is the agent's own mistake. */
+  action_error: string | null;
   safety_acknowledged: boolean;
   latency_ms: number;
 }

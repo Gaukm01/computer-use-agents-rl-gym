@@ -231,7 +231,12 @@ def run_job(
         # next run fails with "port already allocated". NOTE: this removes every ephemeral
         # container, so starting a second job while one runs would destroy the first job's
         # gyms -- jobs are expected to run one at a time.
-        gym_stack.sweep()
+        found, removed, sweep_error = gym_stack.sweep()
+        if sweep_error and removed < found:
+            # Not fatal -- provisioning will fail loudly per attempt if ports are still
+            # held -- but silence here previously hid a degraded Docker daemon.
+            log_line = f"sweep: {removed}/{found} orphans removed; {sweep_error}"
+            print(log_line)
         try:
             # Capped at the port allocator: an extra thread would only block in claim().
             workers = max(1, min(spec.concurrency, ports.MAX_GYMS))

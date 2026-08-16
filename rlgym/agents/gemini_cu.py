@@ -71,6 +71,15 @@ _SCREENSHOT_FUNCTIONS = frozenset(
 # would otherwise spin without consuming step budget.
 MAX_CONSECUTIVE_MALFORMED = 3
 
+# Raised by upstream's handle_action when the model emits a call the tool schema cannot
+# satisfy -- e.g. `drag_and_drop` without `x`, which indexes `action.args["x"]` directly.
+#
+# These are the AGENT's mistakes, not broken infrastructure, and must not end the attempt:
+# doing so converts a legitimate agent failure into NOT_OBSERVED and deletes it from the
+# pass@k denominator. Observed for real: three attempts in one job died this way, one of
+# them 18 steps into otherwise sensible work.
+MALFORMED_ACTION_ERRORS = (KeyError, TypeError, ValueError, IndexError, AttributeError)
+
 # When this few steps remain, every observation carries an explicit instruction to submit.
 #
 # Motivated by an observed failure rather than invented: on problem10 the agent had the
@@ -307,6 +316,7 @@ class GeminiComputerUseAgent(BrowserAgent):
                 # --- execute ----------------------------------------------------------
                 refused = False
                 refused_reason = None
+                action_error = None
                 action_started = time.monotonic()
                 try:
                     result = self.handle_action(
@@ -316,7 +326,24 @@ class GeminiComputerUseAgent(BrowserAgent):
                     refused = True
                     refused_reason = exc.reason
                     result = computer.current_state()
+                except MALFORMED_ACTION_ERRORS as exc:
+                    # The agent's own mistake, so it stays the agent's problem: hand the
+                    # error back as an observation and let the episode continue. It costs a
+                    # step, so an agent that keeps emitting bad calls still terminates --
+                    # as MAX_STEPS_EXCEEDED with reward 0, which is an honest verdict.
+                    # Ending the attempt here instead would exclude it from pass@k entirely.
+                    action_error = f"{type(exc).__name__}: {exc}"
+                    try:
+                        result = computer.current_state()
+                    except Exception as inner:  # noqa: BLE001
+                        # The browser is genuinely gone -- that IS a harness failure.
+                        return finish(
+                            StopReason.HARNESS_ERROR,
+                            error=f"after {call.name} failed: {type(inner).__name__}: {inner}",
+                        )
                 except Exception as exc:  # noqa: BLE001
+                    # Reserved for real infrastructure faults: a dead browser, a crashed
+                    # driver, a bug of ours.
                     return finish(
                         StopReason.HARNESS_ERROR,
                         error=f"executing {call.name}: {type(exc).__name__}: {exc}",
@@ -345,6 +372,11 @@ class GeminiComputerUseAgent(BrowserAgent):
                         # Hand the refusal back as an observation so the model can adapt
                         # rather than silently repeating a no-op.
                         payload["error"] = refused_reason
+                    elif action_error:
+                        # The raw exception, and nothing else. No hint about what was
+                        # missing and no instruction on how to fix it -- recovering from
+                        # its own malformed call is part of what is being measured.
+                        payload["error"] = action_error
                     function_responses.append(
                         FunctionResponse(
                             name=call.name,
@@ -376,6 +408,7 @@ class GeminiComputerUseAgent(BrowserAgent):
                         url=getattr(result, "url", None),
                         refused=refused,
                         refused_reason=refused_reason,
+                        action_error=action_error,
                         safety_acknowledged=acknowledged,
                         safety_explanation=explanation,
                         latency_ms=latency_ms + action_ms,

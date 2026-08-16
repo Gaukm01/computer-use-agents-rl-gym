@@ -55,6 +55,12 @@ function Slide({
             Refused by the environment: {step.refused_reason}
           </div>
         )}
+        {step.action_error && (
+          <div className="error-box" style={{ marginTop: 12 }}>
+            <b>Malformed call</b> — returned to the agent, which continued:
+            <div className="mono" style={{ marginTop: 4 }}>{step.action_error}</div>
+          </div>
+        )}
         {step.safety_acknowledged && (
           <div style={{ marginTop: 12 }}>
             <span className="pill pill-warn">safety confirmation auto-acknowledged</span>

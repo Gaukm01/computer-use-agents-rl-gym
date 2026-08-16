@@ -198,6 +198,12 @@ class StepRecord(BaseModel):
     refused: bool = False
     refused_reason: str | None = None
 
+    # Set when the model emitted a call the tool schema could not satisfy -- a missing or
+    # wrong-typed argument. Deliberately distinct from `refused`: a refusal is our boundary,
+    # this is the agent's own mistake. Recorded so the malformed call is visible in the
+    # transcript instead of vanishing with the exception.
+    action_error: str | None = None
+
     # The model asked for confirmation on a flagged action. Unattended rollouts cannot
     # block on a human (upstream calls input() here), so it is auto-acknowledged and
     # recorded. Surfaced explicitly because auto-approving a safety check is a policy

@@ -334,8 +334,14 @@ def ephemeral_gym(
 # ======================================================================================
 
 
-def sweep() -> int:
+def sweep() -> tuple[int, int, str | None]:
     """Force-remove every ephemeral container and its volumes.
+
+    Returns (found, removed, error). Reporting both matters: when the Docker daemon is
+    degraded -- e.g. after the host filled and corrupted containerd's metadata -- `docker rm`
+    fails while still exiting quietly enough to look successful. An earlier version returned
+    the number *found* and ignored the exit code, so it cheerfully reported "swept 6" having
+    removed none.
 
     Called once at the top of a job. Prevents "port already allocated" on the run after a
     Ctrl-C or a killed API server.
@@ -346,17 +352,26 @@ def sweep() -> int:
     """
     found = _run(["docker", "ps", "-aq", "--filter", f"label={EPHEMERAL_LABEL}"], timeout=60)
     container_ids = found.stdout.split()
+    error: str | None = None
+
     if container_ids:
-        _run(["docker", "rm", "-f", *container_ids], timeout=180)
+        removed = _run(["docker", "rm", "-f", *container_ids], timeout=180)
+        if removed.returncode != 0:
+            error = (removed.stderr or "").strip()[-400:] or "docker rm failed"
 
     # `docker rm` leaves named volumes behind; without this they accumulate ~50 MB per
     # orphaned attempt.
     volumes = _run(["docker", "volume", "ls", "-q"], timeout=60)
     stale = [v for v in volumes.stdout.split() if v.startswith(PROJECT_PREFIX)]
     if stale:
-        _run(["docker", "volume", "rm", "-f", *stale], timeout=180)
+        dropped = _run(["docker", "volume", "rm", "-f", *stale], timeout=180)
+        if dropped.returncode != 0 and error is None:
+            error = (dropped.stderr or "").strip()[-400:] or "docker volume rm failed"
 
-    return len(container_ids)
+    # Recount rather than trust the exit codes.
+    still = _run(["docker", "ps", "-aq", "--filter", f"label={EPHEMERAL_LABEL}"], timeout=60)
+    remaining = len(still.stdout.split())
+    return len(container_ids), len(container_ids) - remaining, error
 
 
 # ======================================================================================
