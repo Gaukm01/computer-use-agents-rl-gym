@@ -3,8 +3,8 @@
 The pure origin logic runs anywhere. The browser tests need a live gym and a captured auth
 cookie, and skip cleanly without them so `pytest tests/` stays green on a fresh checkout.
 
-    colima start && (cd metabase && docker compose up -d)
-    agent/.venv/bin/python -m rlgym.capture_auth
+    colima start
+    agent/.venv/bin/python -m rlgym.gym_stack --port 3000 --keep   # in another shell
     agent/.venv/bin/python -m pytest tests/ -v
 """
 
@@ -32,11 +32,11 @@ def gym_is_up() -> bool:
 
 
 needs_gym = pytest.mark.skipif(
-    not gym_is_up(), reason="gym not running on localhost:3000"
+    not gym_is_up(), reason="no gym on :3000 — start one with `python -m rlgym.gym_stack --port 3000 --keep`"
 )
 needs_auth = pytest.mark.skipif(
     not vendor.STORAGE_STATE.is_file(),
-    reason="no storage_state.json -- run python -m rlgym.capture_auth",
+    reason="no storage_state.json — `--keep` writes one when it provisions",
 )
 
 

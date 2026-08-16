@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from rlgym import service, vendor
+from rlgym import ports, service, vendor
 from rlgym.schemas import HealthStatus, JobResult, Task
 
 app = FastAPI(
@@ -53,7 +53,7 @@ class SubmitJobRequest(BaseModel):
         default=None, description="Which tasks to run. Omit for all tasks in the file."
     )
     attempts_per_task: int = Field(default=1, ge=1, le=20)
-    concurrency: int = Field(default=3, ge=1, le=10)
+    concurrency: int = Field(default=3, ge=1, le=ports.MAX_GYMS)
     tasks_file: str | None = Field(
         default=None,
         description="Path returned by /api/tasks/upload. Omit for the bundled tasks.json.",
@@ -62,7 +62,6 @@ class SubmitJobRequest(BaseModel):
     hint: str | None = None
     max_steps: int | None = Field(default=None, ge=1, le=200)
     timeout_s: int | None = Field(default=None, ge=30, le=3600)
-    gym_url: str = "http://localhost:3000"
     record_video: bool = True
 
 
@@ -78,15 +77,13 @@ class UploadTasksResponse(BaseModel):
 
 
 @app.get("/api/health", response_model=HealthStatus)
-def health(gym_url: str = service.DEFAULT_GYM_URL) -> HealthStatus:
-    """The two things that make every run fail: the gym being down, and the auth cookie
-    not working. Surfaced up front so nobody debugs a failed job when the real problem is
-    setup.
+def health() -> HealthStatus:
+    """What gates a run. There is no long-lived gym to probe -- each attempt provisions
+    its own -- so this reports Docker, the images, the seed dump and the credentials.
 
-    Note `auth_valid` is checked by actually using the cookie, not by checking the file
-    exists — an expired session used to report healthy and then error every attempt.
+    Surfaced up front so nobody debugs a failed job when the real problem is setup.
     """
-    return service.health(gym_url)
+    return service.health()
 
 
 # ======================================================================================
@@ -139,7 +136,6 @@ def submit_job(request: SubmitJobRequest) -> JobResult:
             hint=request.hint,
             max_steps=request.max_steps,
             timeout_s=request.timeout_s,
-            gym_url=request.gym_url,
             record_video=request.record_video,
             tasks_file=request.tasks_file,
             block=False,

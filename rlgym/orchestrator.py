@@ -25,7 +25,7 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from . import executor, schemas, tasks as tasks_module, vendor
+from . import executor, gym_stack, ports, schemas, tasks as tasks_module, vendor
 from .schemas import (
     AgentConfig,
     AttemptArtifact,
@@ -86,6 +86,7 @@ def summarize(
         task_id=artifact.task_id,
         attempt_index=artifact.attempt_index,
         status=artifact.status,
+        phase=artifact.phase,
         reward=artifact.reward,
         verdict=evaluation.verdict if evaluation else None,
         near_miss=evaluation.near_miss if evaluation else False,
@@ -139,7 +140,6 @@ def build_spec(
     concurrency: int = 3,
     agent_config: AgentConfig | None = None,
     limits: Limits | None = None,
-    gym_url: str = "http://localhost:3000",
     headless: bool = True,
     record_video: bool = True,
     tasks_file: str | None = None,
@@ -153,7 +153,6 @@ def build_spec(
         concurrency=concurrency,
         agent_config=agent_config or AgentConfig(),
         limits=limits or Limits(),
-        gym_url=gym_url,
         headless=headless,
         record_video=record_video,
         created_at=_now(),
@@ -212,7 +211,6 @@ def run_job(
             task,
             agent_config=spec.agent_config,
             limits=spec.limits,
-            gym_url=spec.gym_url,
             job_id=spec.job_id,
             attempt_index=index,
             headless=spec.headless,
@@ -229,8 +227,15 @@ def run_job(
             on_update(result)
 
     if queue:
+        # Remove containers orphaned by a previous Ctrl-C or a killed API server, else the
+        # next run fails with "port already allocated". NOTE: this removes every ephemeral
+        # container, so starting a second job while one runs would destroy the first job's
+        # gyms -- jobs are expected to run one at a time.
+        gym_stack.sweep()
         try:
-            with ThreadPoolExecutor(max_workers=max(1, spec.concurrency)) as pool:
+            # Capped at the port allocator: an extra thread would only block in claim().
+            workers = max(1, min(spec.concurrency, ports.MAX_GYMS))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures: list[Future] = []
                 for task, index in queue:
                     if cancel.is_set():

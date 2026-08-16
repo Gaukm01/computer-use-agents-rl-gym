@@ -12,12 +12,19 @@ preference:
     SIGKILL a subprocess; you cannot reliably interrupt a blocked sync call in a thread.
   * A crashing browser or a segfaulting driver takes down one attempt, not the whole job.
 
-Status assignment lives here, with one deliberate hand-off: an attempt that submitted an
-answer is written as COMPLETED_INCORRECT ("completed, pending grading") and only the grader
-promotes it to COMPLETED_CORRECT. That keeps the reward function in exactly one place.
+**Each attempt also gets its own gym.** `execute_attempt()` provisions an ephemeral Metabase
++ Postgres stack, runs the worker against it, and destroys it. The provisioning wraps the
+`Popen` in THIS process, never inside the worker: a timeout kills the worker with SIGKILL,
+which runs no `finally`, so teardown placed there would leak a container and a port on
+precisely the path that most needs cleaning up.
 
-The artifact is rewritten after every step, so a killed attempt still yields the trajectory
-up to the kill, and so a UI can watch progress live.
+Status assignment lives here, with one deliberate hand-off: an attempt that produced an
+answer is written as ANSWERED, and only the grader promotes it to CORRECT. That keeps the
+reward function in exactly one place.
+
+The artifact is rewritten after every step and on every phase change, so a killed attempt
+still yields the trajectory up to the kill, and a UI can watch progress live -- including
+the ~2 minutes of provisioning before the agent starts.
 """
 
 from __future__ import annotations
@@ -37,11 +44,12 @@ from dotenv import load_dotenv
 
 # Modules for behaviour, so call sites say where it lives -- grader.grade() is pure, while
 # grade_attempt() below also mutates status and writes to disk. Types stay direct.
-from . import grader, vendor
+from . import grader, gym_stack, vendor
 from .agents.base import AgentRunResult
 from .schemas import (
     AgentConfig,
     AttemptArtifact,
+    AttemptPhase,
     AttemptStatus,
     EvaluationResult,
     Limits,
@@ -61,20 +69,25 @@ WORKER_LOG = "worker.log"
 STEPS_DIR = "steps"
 VIDEO_DIR = "video"
 
-# How an agent's reason for stopping becomes an attempt status.
+# How an attempt's reason for stopping becomes its status.
 STOP_REASON_TO_STATUS: dict[StopReason, AttemptStatus] = {
-    # "Completed, pending grading" -- the grader promotes a correct answer.
-    StopReason.SUBMITTED: AttemptStatus.COMPLETED_INCORRECT,
+    # An answer exists but has not been graded yet; grade_attempt promotes it to CORRECT.
+    StopReason.SUBMITTED: AttemptStatus.ANSWERED,
     # Had budget, produced no answer. Genuine agent failure.
-    StopReason.NO_FUNCTION_CALL: AttemptStatus.COMPLETED_INCORRECT,
+    StopReason.NO_FUNCTION_CALL: AttemptStatus.ANSWERED,
     StopReason.MAX_STEPS: AttemptStatus.MAX_STEPS_EXCEEDED,
     StopReason.TIMEOUT: AttemptStatus.TIMED_OUT,
     # Outcome never observed -> reward None, excluded from pass@k.
-    StopReason.API_ERROR: AttemptStatus.ERRORED,
-    StopReason.HARNESS_ERROR: AttemptStatus.ERRORED,
+    StopReason.API_ERROR: AttemptStatus.NOT_OBSERVED,
+    StopReason.HARNESS_ERROR: AttemptStatus.NOT_OBSERVED,
     # A provider-side refusal also means we failed to observe the agent's capability.
-    StopReason.SAFETY_BLOCKED: AttemptStatus.ERRORED,
+    StopReason.SAFETY_BLOCKED: AttemptStatus.NOT_OBSERVED,
+    # Raised in the parent, before any worker exists.
+    StopReason.GYM_PROVISION_FAILED: AttemptStatus.NOT_OBSERVED,
+    StopReason.GYM_AUTH_FAILED: AttemptStatus.NOT_OBSERVED,
 }
+
+STORAGE_STATE_NAME = "storage_state.json"
 
 
 def _now() -> datetime:
@@ -144,6 +157,9 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
         limits=limits,
         gym_url=gym_url,
         status=AttemptStatus.IN_PROGRESS,
+        # Reaching the worker at all proves provisioning and auth already succeeded.
+        phase=AttemptPhase.CONNECTING,
+        pristine_counts=spec.get("pristine_counts"),
         started_at=_now(),
     )
     write_artifact(artifact, out_dir)
@@ -163,7 +179,7 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key or api_key == "PASTE_YOUR_KEY_HERE":
-        artifact.status = AttemptStatus.ERRORED
+        artifact.status = AttemptStatus.NOT_OBSERVED
         artifact.stop_reason = StopReason.HARNESS_ERROR
         artifact.error = "GEMINI_API_KEY missing from .env"
         finalize()
@@ -175,7 +191,7 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
         from .agents.gemini_cu import GeminiComputerUseAgent
         from .computer import GymComputer
     except Exception as exc:  # noqa: BLE001
-        artifact.status = AttemptStatus.ERRORED
+        artifact.status = AttemptStatus.NOT_OBSERVED
         artifact.stop_reason = StopReason.HARNESS_ERROR
         artifact.error = f"import failed: {type(exc).__name__}: {exc}"
         finalize()
@@ -183,7 +199,9 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
 
     steps_dir = out_dir / STEPS_DIR
     video_dir = (out_dir / VIDEO_DIR) if record_video else None
-    storage_state = vendor.STORAGE_STATE if vendor.STORAGE_STATE.is_file() else None
+    # Minted by the parent for this attempt's own gym -- no longer a shared global path.
+    raw_state = spec.get("storage_state")
+    storage_state = pathlib.Path(raw_state) if raw_state else None
 
     result: AgentRunResult | None = None
     # The agent stops itself slightly before the parent's kill deadline.
@@ -202,26 +220,26 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
             # Pre-flight: a stale cookie is an INFRASTRUCTURE failure. Without this check
             # the agent would spend its whole budget staring at a login form and the run
             # would look like an analysis failure.
-            if storage_state is None:
-                artifact.status = AttemptStatus.ERRORED
+            if storage_state is None or not storage_state.is_file():
+                artifact.status = AttemptStatus.NOT_OBSERVED
                 artifact.stop_reason = StopReason.HARNESS_ERROR
-                artifact.error = (
-                    f"no storage_state at {vendor.STORAGE_STATE}; run "
-                    "`python -m rlgym.capture_auth` first"
-                )
+                artifact.error = f"spec carried no usable storage_state ({raw_state!r})"
                 finalize()
                 return 1
             if not computer.is_authenticated():
-                artifact.status = AttemptStatus.ERRORED
+                # The parent already verified this session over HTTP, so failing here means
+                # the browser could not use it -- cookie shape or origin mismatch.
+                artifact.status = AttemptStatus.NOT_OBSERVED
                 artifact.stop_reason = StopReason.HARNESS_ERROR
                 artifact.error = (
-                    "not authenticated after injecting storage_state (session likely "
-                    "expired) -- re-run `python -m rlgym.capture_auth`"
+                    "browser landed on /auth/login despite a session the parent verified"
                 )
                 finalize()
                 return 1
 
             agent = GeminiComputerUseAgent(agent_config, api_key=api_key)
+            artifact.phase = AttemptPhase.RUNNING
+            write_artifact(artifact, out_dir)
 
             def on_step(step: StepRecord) -> None:
                 # Persist after every action so a killed attempt keeps its trajectory,
@@ -254,7 +272,7 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
                 artifact.video_path = str(computer.video_path)
 
     except Exception as exc:  # noqa: BLE001 -- harness failure, not agent failure
-        artifact.status = AttemptStatus.ERRORED
+        artifact.status = AttemptStatus.NOT_OBSERVED
         artifact.stop_reason = StopReason.HARNESS_ERROR
         artifact.error = f"{type(exc).__name__}: {exc}"
         finalize(result)
@@ -262,7 +280,7 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
 
     artifact.stop_reason = result.stop_reason
     artifact.status = STOP_REASON_TO_STATUS.get(
-        result.stop_reason, AttemptStatus.ERRORED
+        result.stop_reason, AttemptStatus.NOT_OBSERVED
     )
     artifact.actual_output = result.submitted_answer
     artifact.actual_output_raw = result.submitted_answer_raw
@@ -282,86 +300,137 @@ def execute_attempt(
     *,
     agent_config: AgentConfig | None = None,
     limits: Limits | None = None,
-    gym_url: str | None = None,
     job_id: str | None = None,
     attempt_index: int = 0,
     headless: bool = True,
     record_video: bool = True,
 ) -> AttemptArtifact:
-    """Run one attempt in a subprocess and return its artifact."""
+    """Provision a private gym, run one attempt in a subprocess, tear the gym down.
+
+    The gym wraps the `Popen` **in this process**, never inside the worker: a timeout kills
+    the worker with SIGKILL, which runs no `finally`, so teardown placed in the worker would
+    leak a container and a port on exactly the path that needs cleaning up most. It also
+    keeps `limits.timeout_s` a pure agent budget -- provisioning is not charged to it.
+    """
     agent_config = agent_config or AgentConfig()
     limits = limits or Limits(
         max_steps=task.max_steps or Limits().max_steps,
         timeout_s=task.timeout_s or Limits().timeout_s,
     )
-    gym_url = (gym_url or os.environ.get("METABASE_URL") or "http://localhost:3000").rstrip("/")
 
     attempt_id = new_attempt_id(task.id, attempt_index)
     out_dir = attempt_dir(attempt_id, job_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    spec = {
-        "attempt_id": attempt_id,
-        "job_id": job_id,
-        "attempt_index": attempt_index,
-        "task": task.model_dump(),
-        "agent_config": agent_config.model_dump(),
-        "limits": limits.model_dump(),
-        "out_dir": str(out_dir),
-        "gym_url": gym_url,
-        "headless": headless,
-        "record_video": record_video,
-    }
-    spec_path = out_dir / SPEC_NAME
-    spec_path.write_text(json.dumps(spec, indent=2))
+    # Written before anything slow happens, so the attempt is visible in the UI from the
+    # first second rather than only once the worker starts ~2 minutes later.
+    pending = AttemptArtifact(
+        attempt_id=attempt_id,
+        task_id=task.id,
+        job_id=job_id,
+        attempt_index=attempt_index,
+        agent_config=agent_config,
+        limits=limits,
+        gym_url="",
+        status=AttemptStatus.IN_PROGRESS,
+        phase=AttemptPhase.QUEUED,
+        started_at=_now(),
+    )
+    write_artifact(pending, out_dir)
 
-    cmd = [sys.executable, "-m", "rlgym.executor", "--worker", str(spec_path)]
-    log_path = out_dir / WORKER_LOG
+    def on_phase(phase: AttemptPhase) -> None:
+        pending.phase = phase
+        write_artifact(pending, out_dir)
 
+    def on_pristine(counts: dict[str, int]) -> None:
+        pending.pristine_counts = counts
+
+    def fail(reason: StopReason, message: str) -> AttemptArtifact:
+        pending.status = AttemptStatus.NOT_OBSERVED
+        pending.stop_reason = reason
+        pending.error = message
+        pending.ended_at = _now()
+        if pending.started_at:
+            pending.duration_s = (pending.ended_at - pending.started_at).total_seconds()
+        write_artifact(pending, out_dir)
+        return pending
+
+    storage_state_path = out_dir / STORAGE_STATE_NAME
     timed_out = False
-    with log_path.open("w") as log:
-        # start_new_session gives the worker its own process group, so a timeout can kill
-        # the browser and driver it spawned rather than orphaning them.
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(vendor.PROJECT_ROOT),
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        try:
-            proc.wait(timeout=limits.timeout_s + SHUTDOWN_GRACE_S)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                pass
+    proc = None
+
+    try:
+        with gym_stack.ephemeral_gym(
+            attempt_id,
+            storage_state_path=storage_state_path,
+            on_phase=on_phase,
+            on_pristine=on_pristine,
+        ) as (gym_url, storage_state):
+            pending.gym_url = gym_url
+            write_artifact(pending, out_dir)
+
+            spec = {
+                "attempt_id": attempt_id,
+                "job_id": job_id,
+                "attempt_index": attempt_index,
+                "task": task.model_dump(),
+                "agent_config": agent_config.model_dump(),
+                "limits": limits.model_dump(),
+                "out_dir": str(out_dir),
+                "gym_url": gym_url,
+                "storage_state": str(storage_state),
+                "headless": headless,
+                "record_video": record_video,
+                "pristine_counts": pending.pristine_counts,
+            }
+            spec_path = out_dir / SPEC_NAME
+            spec_path.write_text(json.dumps(spec, indent=2))
+
+            cmd = [sys.executable, "-m", "rlgym.executor", "--worker", str(spec_path)]
+            log_path = out_dir / WORKER_LOG
+
+            with log_path.open("w") as log:
+                # start_new_session gives the worker its own process group, so a timeout can
+                # kill the browser and driver it spawned rather than orphaning them.
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(vendor.PROJECT_ROOT),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                try:
+                    proc.wait(timeout=limits.timeout_s + SHUTDOWN_GRACE_S)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        proc.kill()
+                    try:
+                        proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        pass
+    except gym_stack.GymProvisionError as exc:
+        return fail(StopReason.GYM_PROVISION_FAILED, str(exc))
+    except gym_stack.GymAuthError as exc:
+        return fail(StopReason.GYM_AUTH_FAILED, str(exc))
 
     artifact = read_artifact(out_dir)
     if artifact is None:
         # The worker died before writing anything -- an import error or an OOM kill.
         tail = ""
+        log_path = out_dir / WORKER_LOG
         if log_path.is_file():
             tail = log_path.read_text()[-1500:]
-        return AttemptArtifact(
-            attempt_id=attempt_id,
-            task_id=task.id,
-            job_id=job_id,
-            attempt_index=attempt_index,
-            agent_config=agent_config,
-            limits=limits,
-            gym_url=gym_url,
-            status=AttemptStatus.ERRORED,
-            stop_reason=StopReason.HARNESS_ERROR,
-            error=f"worker produced no artifact (exit {proc.returncode}). Log tail:\n{tail}",
-            started_at=_now(),
-            ended_at=_now(),
+        exit_code = proc.returncode if proc is not None else "n/a"
+        return fail(
+            StopReason.HARNESS_ERROR,
+            f"worker produced no artifact (exit {exit_code}). Log tail:\n{tail}",
         )
+
+    # The worker rebuilt the artifact from its spec, so parent-only fields are restored here.
+    artifact.pristine_counts = artifact.pristine_counts or pending.pristine_counts
 
     if timed_out:
         # Hard kill: the worker never got to classify itself. Its partial trajectory
@@ -372,16 +441,15 @@ def execute_attempt(
             artifact.error
             or f"killed after {limits.timeout_s + SHUTDOWN_GRACE_S}s wall clock"
         )
-        write_artifact(artifact, out_dir)
     elif artifact.status is AttemptStatus.IN_PROGRESS:
         # Exited without finalizing: a crash the worker's own handler didn't catch.
-        artifact.status = AttemptStatus.ERRORED
+        artifact.status = AttemptStatus.NOT_OBSERVED
         artifact.stop_reason = StopReason.HARNESS_ERROR
-        artifact.error = artifact.error or (
-            f"worker exited with code {proc.returncode} mid-attempt"
-        )
-        write_artifact(artifact, out_dir)
+        exit_code = proc.returncode if proc is not None else "n/a"
+        artifact.error = artifact.error or f"worker exited with code {exit_code} mid-attempt"
 
+    artifact.phase = AttemptPhase.GRADING
+    write_artifact(artifact, out_dir)
     return artifact
 
 
@@ -392,12 +460,28 @@ def grade_attempt(artifact: AttemptArtifact, task: Task) -> EvaluationResult:
     the executor never decides correctness, and the grader is the only thing that can set
     COMPLETED_CORRECT.
     """
-    evaluation = grader.grade(artifact, task)
     out_dir = attempt_dir(artifact.attempt_id, artifact.job_id)
+    try:
+        evaluation = grader.grade(artifact, task)
+    except Exception as exc:  # noqa: BLE001
+        # Contained deliberately: this runs inside a pool future, so an exception here
+        # propagates through future.result() and marks the WHOLE job FAILED. One malformed
+        # task.answer would take down a 30-attempt run.
+        evaluation = EvaluationResult(
+            attempt_id=artifact.attempt_id,
+            task_id=task.id,
+            verdict="not_graded",
+            reward=None,
+            diff=f"grader raised {type(exc).__name__}: {exc}",
+            evaluated_at=_now(),
+            evaluator_version=grader.EVALUATOR_VERSION,
+        )
+    else:
+        if evaluation.verdict == "pass":
+            artifact.status = AttemptStatus.CORRECT
 
-    if evaluation.verdict == "pass":
-        artifact.status = AttemptStatus.COMPLETED_CORRECT
-        write_artifact(artifact, out_dir)
+    artifact.phase = AttemptPhase.DONE
+    write_artifact(artifact, out_dir)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / EVALUATION_NAME).write_text(evaluation.model_dump_json(indent=2))

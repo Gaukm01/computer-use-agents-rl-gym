@@ -4,11 +4,21 @@
 export type AttemptStatus =
   | "QUEUED"
   | "IN_PROGRESS"
-  | "COMPLETED_CORRECT"
-  | "COMPLETED_INCORRECT"
+  | "COMPLETED_CORRECT"   // CORRECT — wire value kept from before the rename
+  | "ANSWERED"            // an answer exists and is not correct (or none was given)
   | "MAX_STEPS_EXCEEDED"
   | "TIMED_OUT"
-  | "ERRORED";
+  | "NOT_OBSERVED";       // infrastructure failure — reward null, out of pass@k
+
+/** How far an attempt got. Orthogonal to status; never drives reward. */
+export type AttemptPhase =
+  | "QUEUED"
+  | "PROVISIONING"
+  | "AUTHENTICATING"
+  | "CONNECTING"
+  | "RUNNING"
+  | "GRADING"
+  | "DONE";
 
 export type JobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "CANCELLED" | "FAILED";
 
@@ -23,7 +33,8 @@ export interface AttemptSummary {
   task_id: string;
   attempt_index: number;
   status: AttemptStatus;
-  /** null means the outcome was never observed (ERRORED) -- not a zero. */
+  phase: AttemptPhase;
+  /** null means the outcome was never observed (NOT_OBSERVED) -- not a zero. */
   reward: number | null;
   verdict: string | null;
   near_miss: boolean;
@@ -59,7 +70,6 @@ export interface JobSpec {
   tasks_file: string | null;
   attempts_per_task: number;
   concurrency: number;
-  gym_url: string;
   created_at: string | null;
   agent_config: { model: string; hint: string | null };
   limits: { max_steps: number; timeout_s: number };
@@ -102,6 +112,8 @@ export interface AttemptArtifact {
   task_id: string;
   attempt_index: number;
   status: AttemptStatus;
+  phase: AttemptPhase;
+  pristine_counts: Record<string, number> | null;
   stop_reason: string | null;
   duration_s: number | null;
   steps: StepRecord[];
@@ -136,14 +148,16 @@ export interface AttemptDetail {
   video: string | null;
 }
 
+/** No long-lived gym to probe -- each attempt provisions its own. These are the things
+ *  that gate a run. */
 export interface Health {
   ok: boolean;
-  gym_reachable: boolean;
-  /** The cookie file exists. Says nothing about whether it still works. */
-  auth_captured: boolean;
-  /** The cookie actually authenticates. null = couldn't check (usually the gym is down). */
-  auth_valid: boolean | null;
-  /** Logged-in account when healthy, otherwise why the check failed. */
-  auth_detail: string | null;
+  docker_available: boolean;
+  images_present: boolean;
+  dump_present: boolean;
+  credentials_configured: boolean;
   tasks_available: number;
+  max_gyms: number;
+  /** Human-readable summary of whatever is missing. */
+  detail: string | null;
 }

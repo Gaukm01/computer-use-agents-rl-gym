@@ -177,11 +177,13 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
             <input
               type="number"
               min={1}
-              max={10}
+              max={3}
               value={concurrency}
-              onChange={(e) => setConcurrency(Math.max(1, Number(e.target.value)))}
+              onChange={(e) =>
+                setConcurrency(Math.min(3, Math.max(1, Number(e.target.value))))
+              }
             />
-            <div className="hint">Bounded by API rate limits, not memory.</div>
+            <div className="hint">Each attempt gets its own gym, so this is bounded by memory (max 3).</div>
           </div>
 
           <div className="field">

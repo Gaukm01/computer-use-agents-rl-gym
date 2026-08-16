@@ -35,51 +35,39 @@ export function App() {
           Metabase Computer-Use RL Gym <span>· eval console</span>
         </div>
         <div className="spacer" />
-        {/* The two setup failures that make every run fail. Shown up front so nobody
-            debugs a failed job when the real problem is that the gym is down.
-            Auth has three states on purpose: a cookie that exists but no longer works
-            must not look healthy, and "couldn't check" is not the same as "broken". */}
+        {/* There is no long-lived gym to report on -- each attempt provisions its own.
+            These are the things whose absence would make every attempt fail, shown up
+            front so nobody debugs a failed job when the real problem is setup. */}
         {health && (
           <>
-            <span className={`pill ${health.gym_reachable ? "pill-pass" : "pill-fail"}`}>
-              gym {health.gym_reachable ? "up" : "unreachable"}
+            <span
+              className={`pill ${health.docker_available ? "pill-pass" : "pill-fail"}`}
+            >
+              docker {health.docker_available ? "ok" : "down"}
             </span>
             <span
-              className={`pill ${
-                health.auth_valid === true
-                  ? "pill-pass"
-                  : health.auth_valid === false
-                    ? "pill-fail"
-                    : "pill-warn"
-              }`}
-              title={health.auth_detail ?? undefined}
+              className={`pill ${health.images_present ? "pill-pass" : "pill-fail"}`}
+              title="Images must be pulled ahead of time — a cold pull inside an attempt reads as a hang"
             >
-              auth{" "}
-              {health.auth_valid === true
-                ? "valid"
-                : health.auth_valid === false
-                  ? "invalid"
-                  : "unknown"}
+              images {health.images_present ? "ready" : "missing"}
+            </span>
+            <span
+              className={`pill ${health.credentials_configured ? "pill-pass" : "pill-fail"}`}
+            >
+              creds {health.credentials_configured ? "set" : "missing"}
+            </span>
+            <span className="pill pill-muted" title="Concurrent gyms, bounded by memory">
+              max {health.max_gyms} gyms
             </span>
           </>
         )}
       </header>
 
       <main className="container">
-        {health && !health.gym_reachable && (
+        {health?.detail && (
           <div className="error-box">
-            The gym is not reachable at http://localhost:3000. Start it with{" "}
-            <span className="mono">colima start</span> then{" "}
-            <span className="mono">cd metabase &amp;&amp; docker compose up -d</span>.
-          </div>
-        )}
-        {health && health.gym_reachable && health.auth_valid === false && (
-          <div className="error-box">
-            <b>Auth will not work — every attempt would report ERRORED.</b>
-            <div style={{ marginTop: 4 }}>{health.auth_detail}</div>
-            <div style={{ marginTop: 6 }} className="mono">
-              agent/.venv/bin/python -m rlgym.capture_auth
-            </div>
+            <b>Attempts will fail until this is fixed.</b>
+            <div style={{ marginTop: 4 }}>{health.detail}</div>
           </div>
         )}
 

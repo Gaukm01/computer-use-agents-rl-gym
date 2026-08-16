@@ -259,7 +259,7 @@ def grade(artifact: AttemptArtifact, task: Task) -> EvaluationResult:
     """Produce a verdict for one attempt.
 
     Only COMPLETED_* attempts are compared. Every other terminal status already carries
-    its reward: MAX_STEPS_EXCEEDED and TIMED_OUT are agent failures (0), ERRORED means the
+    its reward: MAX_STEPS_EXCEEDED and TIMED_OUT are agent failures (0), NOT_OBSERVED means the
     outcome was never observed (None) and must not be scored as a failure.
     """
     now = datetime.now(timezone.utc)
@@ -286,11 +286,11 @@ def grade(artifact: AttemptArtifact, task: Task) -> EvaluationResult:
 
     if artifact.status not in schemas.GRADEABLE_STATUSES:
         reward = schemas.reward_for_status(artifact.status)
-        if artifact.status is AttemptStatus.ERRORED:
+        if artifact.status is AttemptStatus.NOT_OBSERVED:
             return result(
                 "not_graded",
                 None,
-                diff=f"not graded -- attempt ERRORED: {artifact.error or 'unknown'}",
+                diff=f"not graded -- outcome not observed: {artifact.error or 'unknown'}",
             )
         return result(
             "fail", reward, diff=f"not graded -- status {artifact.status.value}"

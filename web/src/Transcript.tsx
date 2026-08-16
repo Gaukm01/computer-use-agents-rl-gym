@@ -133,7 +133,7 @@ export function Transcript({
           <div className="grade-row">
             <span className="grade-key">Reward:</span>
             <span className="grade-val">
-              {artifact.status === "ERRORED"
+              {artifact.status === "NOT_OBSERVED"
                 ? "null — excluded from pass@k, not counted as a failure"
                 : String(evaluation?.reward ?? "—")}
             </span>

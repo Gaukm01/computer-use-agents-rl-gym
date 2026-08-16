@@ -29,7 +29,7 @@ TASKS = tasks.load_task_map()
 def make_artifact(
     task_id: str,
     actual_output=None,
-    status: AttemptStatus = AttemptStatus.COMPLETED_INCORRECT,
+    status: AttemptStatus = AttemptStatus.ANSWERED,
     actual_output_raw: str | None = None,
     error: str | None = None,
 ) -> AttemptArtifact:
@@ -214,7 +214,7 @@ def test_errored_is_not_graded_and_reward_is_none() -> None:
     """ERRORED must NOT become reward 0 -- the outcome was never observed."""
     task = TASKS["problem1"]
     artifact = make_artifact(
-        "problem1", status=AttemptStatus.ERRORED, error="Gemini 503"
+        "problem1", status=AttemptStatus.NOT_OBSERVED, error="Gemini 503"
     )
     result = grader.grade(artifact, task)
     assert result.verdict == "not_graded"

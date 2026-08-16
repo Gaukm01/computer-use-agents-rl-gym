@@ -36,11 +36,11 @@ BOLD, DIM, RED, GREEN, YELLOW, RESET = (
 )
 
 STATUS_COLOUR = {
-    AttemptStatus.COMPLETED_CORRECT: GREEN,
-    AttemptStatus.COMPLETED_INCORRECT: RED,
+    AttemptStatus.CORRECT: GREEN,
+    AttemptStatus.ANSWERED: RED,
     AttemptStatus.MAX_STEPS_EXCEEDED: YELLOW,
     AttemptStatus.TIMED_OUT: YELLOW,
-    AttemptStatus.ERRORED: YELLOW,
+    AttemptStatus.NOT_OBSERVED: YELLOW,
 }
 
 
@@ -48,7 +48,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run one task once against the gym.")
     parser.add_argument("--task", required=True, help="Task id, e.g. problem1")
     parser.add_argument("--tasks-file", default=None, help="Override tasks.json path")
-    parser.add_argument("--gym-url", default=None, help="Default http://localhost:3000")
     parser.add_argument("--model", default=AgentConfig().model)
     parser.add_argument("--hint", default=None, help="Optional extra guidance (ablation)")
     parser.add_argument("--max-steps", type=int, default=None)
@@ -99,7 +98,6 @@ def main() -> int:
         task,
         agent_config=agent_config,
         limits=limits,
-        gym_url=args.gym_url,
         headless=not args.headed,
         record_video=not args.no_video,
     )
@@ -110,6 +108,9 @@ def main() -> int:
     colour = STATUS_COLOUR.get(artifact.status, "")
     reward = artifact.reward
     print(f"{BOLD}status{RESET}      {colour}{artifact.status.value}{RESET}")
+    print(f"{BOLD}gym{RESET}         {artifact.gym_url or '-'}  (ephemeral, torn down)")
+    if artifact.pristine_counts:
+        print(f"{BOLD}pristine{RESET}    {artifact.pristine_counts}")
     print(f"{BOLD}stop{RESET}        {artifact.stop_reason.value if artifact.stop_reason else '-'}")
     print(
         f"{BOLD}reward{RESET}      "
@@ -159,7 +160,7 @@ def main() -> int:
 
     # Exit non-zero only for infrastructure failure. A wrong answer is a valid outcome,
     # so it must not look like a broken pipeline to a caller or CI step.
-    return 1 if artifact.status is AttemptStatus.ERRORED else 0
+    return 1 if artifact.status is AttemptStatus.NOT_OBSERVED else 0
 
 
 if __name__ == "__main__":

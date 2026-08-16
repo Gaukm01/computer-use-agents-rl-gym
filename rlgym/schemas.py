@@ -23,39 +23,50 @@ from pydantic import BaseModel, Field
 
 
 class AttemptStatus(str, Enum):
-    """Lifecycle of a single attempt. The last five are terminal."""
+    """What CLASS of outcome an attempt reached. Drives reward. The last five are terminal.
+
+    See `AttemptPhase` for how far an attempt got, and `StopReason` for why it stopped --
+    three separate axes, deliberately not collapsed into one.
+    """
 
     QUEUED = "QUEUED"
     IN_PROGRESS = "IN_PROGRESS"
 
-    # Agent finished and submitted an answer; the grader decided which of these applies.
-    COMPLETED_CORRECT = "COMPLETED_CORRECT"
-    # Also covers "agent stopped without ever calling submit_answer" -- it had the budget
-    # and produced nothing, which is genuine agent failure.
-    COMPLETED_INCORRECT = "COMPLETED_INCORRECT"
+    CORRECT = "COMPLETED_CORRECT"
+    # An answer exists (or the agent finished without producing one) and is not correct.
+    # Named ANSWERED rather than COMPLETED_INCORRECT because the executor writes it *before*
+    # grading, when correctness is still unknown -- the grader then promotes it to CORRECT.
+    ANSWERED = "ANSWERED"
 
     MAX_STEPS_EXCEEDED = "MAX_STEPS_EXCEEDED"
     TIMED_OUT = "TIMED_OUT"
 
-    # Infrastructure failure, not the agent's fault.
-    ERRORED = "ERRORED"
+    # Infrastructure failure: the outcome was never observed, so it is not a loss.
+    NOT_OBSERVED = "NOT_OBSERVED"
+
+
+# Values written by earlier versions and still present in runs/*/artifact.json. Without a
+# translation, `read_artifact()` swallows the validation error and returns None, so old
+# attempts would silently disappear from list_jobs() and from resume.
+_LEGACY_STATUS = {
+    "COMPLETED_INCORRECT": AttemptStatus.ANSWERED.value,
+    "ERRORED": AttemptStatus.NOT_OBSERVED.value,
+}
 
 
 TERMINAL_STATUSES = frozenset(
     {
-        AttemptStatus.COMPLETED_CORRECT,
-        AttemptStatus.COMPLETED_INCORRECT,
+        AttemptStatus.CORRECT,
+        AttemptStatus.ANSWERED,
         AttemptStatus.MAX_STEPS_EXCEEDED,
         AttemptStatus.TIMED_OUT,
-        AttemptStatus.ERRORED,
+        AttemptStatus.NOT_OBSERVED,
     }
 )
 
 # Statuses where the agent actually produced (or failed to produce) an answer, so the
 # grader has something to judge. Everything else gets its reward directly from status.
-GRADEABLE_STATUSES = frozenset(
-    {AttemptStatus.COMPLETED_CORRECT, AttemptStatus.COMPLETED_INCORRECT}
-)
+GRADEABLE_STATUSES = frozenset({AttemptStatus.CORRECT, AttemptStatus.ANSWERED})
 
 
 def reward_for_status(status: AttemptStatus) -> int | None:
@@ -64,17 +75,35 @@ def reward_for_status(status: AttemptStatus) -> int | None:
     None is not 'zero reward' -- it means this attempt must be excluded from pass@k
     denominators rather than counted as a failure.
     """
-    if status is AttemptStatus.COMPLETED_CORRECT:
+    if status is AttemptStatus.CORRECT:
         return 1
-    if status is AttemptStatus.ERRORED:
+    if status is AttemptStatus.NOT_OBSERVED:
         return None
     if status in TERMINAL_STATUSES:
         return 0
     return None  # non-terminal: not scored yet
 
 
+class AttemptPhase(str, Enum):
+    """How FAR an attempt got. Orthogonal to status, and never drives reward.
+
+    Exists because provisioning a stack makes an attempt invisible for minutes -- the
+    artifact used to appear only once the worker started. It also localizes failure:
+    "12 attempts errored" becomes "11 died in PROVISIONING, 1 in RUNNING", which is the
+    difference between broken infrastructure and a flaky model.
+    """
+
+    QUEUED = "QUEUED"              # attempt dir exists, no port claimed yet
+    PROVISIONING = "PROVISIONING"  # containers up, dump restoring, Metabase booting
+    AUTHENTICATING = "AUTHENTICATING"  # minting and verifying the session
+    CONNECTING = "CONNECTING"      # Playwright launch, pre-flight auth check
+    RUNNING = "RUNNING"            # the agent loop
+    GRADING = "GRADING"
+    DONE = "DONE"                  # terminal, whatever the status
+
+
 class StopReason(str, Enum):
-    """Why the agent loop stopped, independent of whether the answer was right."""
+    """WHY an attempt stopped, independent of whether the answer was right."""
 
     SUBMITTED = "SUBMITTED"  # called submit_answer
     NO_FUNCTION_CALL = "NO_FUNCTION_CALL"  # model stopped acting without submitting
@@ -83,6 +112,13 @@ class StopReason(str, Enum):
     API_ERROR = "API_ERROR"
     HARNESS_ERROR = "HARNESS_ERROR"
     SAFETY_BLOCKED = "SAFETY_BLOCKED"
+
+    # Raised in the parent before a worker exists. Two values rather than one because the
+    # operator action differs: Docker/disk/image vs. credentials. Deliberately no third
+    # value for a browser-launch failure -- `phase` already localizes that, and duplicating
+    # localization into this enum is how the two fields drift apart.
+    GYM_PROVISION_FAILED = "GYM_PROVISION_FAILED"
+    GYM_AUTH_FAILED = "GYM_AUTH_FAILED"
 
 
 class Task(BaseModel):
@@ -186,7 +222,12 @@ class AttemptArtifact(BaseModel):
     gym_url: str
 
     status: AttemptStatus = AttemptStatus.QUEUED
+    phase: AttemptPhase = AttemptPhase.QUEUED
     stop_reason: StopReason | None = None
+
+    # Row counts proving the gym was seeded before this attempt started (see
+    # gym_stack._assert_pristine). Evidence rather than assertion.
+    pristine_counts: dict[str, int] | None = None
 
     started_at: datetime | None = None
     ended_at: datetime | None = None
@@ -228,30 +269,40 @@ class AttemptArtifact(BaseModel):
     def reward(self) -> int | None:
         return reward_for_status(self.status)
 
+    @pydantic.field_validator("status", mode="before")
+    @classmethod
+    def _translate_legacy_status(cls, value):
+        """Accept status values written before the rename (see _LEGACY_STATUS)."""
+        return _LEGACY_STATUS.get(value, value) if isinstance(value, str) else value
+
 
 class HealthStatus(BaseModel):
     """Whether the platform can actually run anything right now.
 
-    `auth_captured` (the cookie file exists) is deliberately separate from `auth_valid`
-    (the cookie still authenticates). Reporting only the former is worse than useless: an
-    expired session shows a healthy signal and then every attempt reports ERRORED, which
-    is exactly the confusing failure the per-attempt pre-flight exists to prevent.
-
-    `auth_valid` is `None` when it could not be determined -- almost always because the
-    gym is down, in which case the cookie's state is unknowable rather than bad.
+    There is no long-lived gym to probe -- each attempt provisions its own. So this checks
+    what genuinely gates a run: can we talk to Docker, are both images already pulled (a
+    cold pull inside an attempt would look like a hang), is the seed dump there, and are
+    the credentials needed to mint a session configured.
     """
 
     ok: bool = True
-    gym_reachable: bool
-    auth_captured: bool
-    auth_valid: bool | None = None
-    # Human-readable: the logged-in account when healthy, or why the check failed.
-    auth_detail: str | None = None
+    docker_available: bool = False
+    images_present: bool = False
+    dump_present: bool = False
+    credentials_configured: bool = False
     tasks_available: int = 0
+    max_gyms: int = 0
+    # Human-readable summary of whatever is missing.
+    detail: str | None = None
 
     @property
     def can_run(self) -> bool:
-        return self.gym_reachable and self.auth_valid is True
+        return (
+            self.docker_available
+            and self.images_present
+            and self.dump_present
+            and self.credentials_configured
+        )
 
 
 class JobStatus(str, Enum):
@@ -279,8 +330,11 @@ class JobSpec(BaseModel):
 
     agent_config: AgentConfig = Field(default_factory=AgentConfig)
     limits: Limits = Field(default_factory=Limits)
-    gym_url: str = "http://localhost:3000"
 
+    # No gym_url: each attempt provisions its own stack on a port claimed at run time, so
+    # there is no job-level URL to configure. AttemptArtifact.gym_url records which one an
+    # attempt actually got. Older job.json files still carry the field; pydantic ignores
+    # unknown keys, so they keep loading.
     headless: bool = True
     record_video: bool = True
 
@@ -300,6 +354,7 @@ class AttemptSummary(BaseModel):
     attempt_index: int
 
     status: AttemptStatus
+    phase: AttemptPhase = AttemptPhase.QUEUED
     reward: int | None = None
     verdict: str | None = None
     near_miss: bool = False
@@ -314,6 +369,12 @@ class AttemptSummary(BaseModel):
 
     has_video: bool = False
     screenshot_count: int = 0
+
+    @pydantic.field_validator("status", mode="before")
+    @classmethod
+    def _translate_legacy_status(cls, value):
+        """job.json is a wire format too -- old summaries must keep loading."""
+        return _LEGACY_STATUS.get(value, value) if isinstance(value, str) else value
 
 
 class TaskResult(BaseModel):

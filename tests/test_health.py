@@ -29,9 +29,9 @@ def gym_is_up() -> bool:
         return False
 
 
-needs_gym = pytest.mark.skipif(not gym_is_up(), reason="gym not running")
+needs_gym = pytest.mark.skipif(not gym_is_up(), reason="no gym on :3000 — start one with `python -m rlgym.gym_stack --port 3000 --keep`")
 needs_auth = pytest.mark.skipif(
-    not service.session_token(), reason="no captured session — run rlgym.capture_auth"
+    not service.session_token(), reason="no captured session — `--keep` writes one when it provisions"
 )
 
 
@@ -109,14 +109,21 @@ def test_live_session_reports_valid_and_names_the_user() -> None:
     assert "@" in (detail or ""), "should report which account the session belongs to"
 
 
-@needs_gym
-@needs_auth
-def test_health_rolls_it_up() -> None:
-    status = service.health(GYM_URL)
-    assert status.gym_reachable is True
-    assert status.auth_valid is True
+def test_health_reports_what_gates_a_run() -> None:
+    """No long-lived gym to probe any more -- each attempt provisions its own. Health now
+    covers the things whose absence makes every attempt fail."""
+    status = service.health()
     assert status.tasks_available == 10
-    assert status.can_run is True
+    assert status.max_gyms >= 1
+    # can_run is the conjunction of all four gates; detail explains any that are false.
+    assert status.can_run == (
+        status.docker_available
+        and status.images_present
+        and status.dump_present
+        and status.credentials_configured
+    )
+    if not status.can_run:
+        assert status.detail
 
 
 # ----------------------------------------------------------------------------------------

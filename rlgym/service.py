@@ -17,12 +17,13 @@ is the Milestone 3 answer, not something to fake here.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from . import executor, orchestrator, tasks as tasks_module, vendor
+from . import executor, orchestrator, ports, tasks as tasks_module, vendor
 from .schemas import (
     AgentConfig,
     AttemptArtifact,
@@ -138,19 +139,71 @@ def check_auth(
         return True, None, f"could not reach the gym to verify the session ({exc})"
 
 
-def health(gym_url: str = DEFAULT_GYM_URL) -> HealthStatus:
-    reachable = gym_reachable(gym_url)
-    captured, valid, detail = check_auth(gym_url)
+REQUIRED_IMAGES = ("postgres:16.9", "metabase/metabase:v0.54.15")
+
+
+def health() -> HealthStatus:
+    """What gates a run, now that every attempt provisions its own gym.
+
+    Images are checked explicitly because a cold `docker pull` inside an attempt would
+    stall provisioning for minutes and read as a hang rather than as setup.
+    """
+    import subprocess
+
+    missing: list[str] = []
+
+    try:
+        docker_ok = (
+            subprocess.run(
+                ["docker", "info", "--format", "{{.ServerVersion}}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        docker_ok = False
+    if not docker_ok:
+        missing.append("Docker daemon unreachable (try `colima start`)")
+
+    images_ok = False
+    if docker_ok:
+        try:
+            listed = subprocess.run(
+                ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            ).stdout.split()
+            absent = [i for i in REQUIRED_IMAGES if i not in listed]
+            images_ok = not absent
+            if absent:
+                missing.append(f"images not pulled: {', '.join(absent)}")
+        except (OSError, subprocess.SubprocessError):
+            missing.append("could not list Docker images")
+
+    dump_ok = (vendor.PROJECT_ROOT / "resources" / "metabase_envdata.sql").is_file()
+    if not dump_ok:
+        missing.append("resources/metabase_envdata.sql missing")
+
+    creds_ok = bool(os.environ.get("METABASE_EMAIL") and os.environ.get("METABASE_PASSWORD"))
+    if not creds_ok:
+        missing.append("METABASE_EMAIL / METABASE_PASSWORD not set in .env")
+
     try:
         count = len(list_tasks())
     except Exception:  # noqa: BLE001 -- a broken task file shouldn't 500 the health check
         count = 0
+
     return HealthStatus(
-        gym_reachable=reachable,
-        auth_captured=captured,
-        auth_valid=valid,
-        auth_detail=detail,
+        docker_available=docker_ok,
+        images_present=images_ok,
+        dump_present=dump_ok,
+        credentials_configured=creds_ok,
         tasks_available=count,
+        max_gyms=ports.MAX_GYMS,
+        detail="; ".join(missing) or None,
     )
 
 
@@ -242,7 +295,6 @@ def submit_job(
     hint: str | None = None,
     max_steps: int | None = None,
     timeout_s: int | None = None,
-    gym_url: str = "http://localhost:3000",
     headless: bool = True,
     record_video: bool = True,
     tasks_file: str | pathlib.Path | None = None,
@@ -280,7 +332,6 @@ def submit_job(
             max_steps=max_steps or defaults.max_steps,
             timeout_s=timeout_s or defaults.timeout_s,
         ),
-        gym_url=gym_url,
         headless=headless,
         record_video=record_video,
         tasks_file=str(tasks_file) if tasks_file else None,

@@ -1,5 +1,11 @@
-name: metabase-gym
-
+# One EPHEMERAL gym stack. Instantiated once per attempt by rlgym/gym_stack.py under a
+# per-attempt project name (`docker compose -p rlgym-<attempt_id>`), and destroyed with
+# `down -v` when the attempt ends. Nothing here is long-lived.
+#
+# There is deliberately no `name:` key -- the project name is supplied per invocation, which
+# is what lets several stacks coexist. For a manual/dev stack:
+#     python -m rlgym.gym_stack --port 3000 --keep
+#
 # Metabase pinned to v0.54.15 deliberately.
 # resources/metabase_envdata.sql is a Metabase v0.54-era app DB (newest Liquibase changeset
 # in the dump: v54.2025-03-28T11:22:01). Booting a newer MINOR (v0.55+) against this DB
@@ -16,21 +22,27 @@ name: metabase-gym
 services:
   postgres:
     image: postgres:16.9
-    container_name: mb-postgres
-    restart: unless-stopped
+    # No container_name: names are globally unique per daemon, so a second concurrent
+    # project would fail to create it. Compose names these <project>-postgres-1.
+    # No restart policy: an ephemeral stack must never resurrect after a daemon restart.
+    labels:
+      # Lets gym_stack.sweep() find orphans left by a Ctrl-C or a killed API server.
+      rlgym.ephemeral: "true"
     environment:
       # User is 'postgres' on purpose: every object in metabase_envdata.sql is owned by
       # 'postgres', so matching it avoids "role does not exist" errors on pg_restore.
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      # Creates the database at first boot, so provisioning restores straight into it --
+      # no DROP/CREATE needed.
       POSTGRES_DB: metabase_app
-    ports:
-      # 5433 on the host to stay clear of any future local postgres on 5432.
-      - "5433:5432"
+    # No ports: nothing outside the container needs Postgres. Seeding runs through
+    # `docker exec` (in-container client, version-matched to the server -- the reason for
+    # the read-only /resources mount below) and the grader is a pure function with no DB
+    # access. Removes a whole class of host port collision.
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Read-only so the dumps can never be modified in place. Gives us an in-container
-      # pg_restore path whose client version matches the server exactly (16.x).
+      # Read-only so the dumps can never be modified in place.
       - ../resources:/resources:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d metabase_app"]
@@ -41,8 +53,8 @@ services:
 
   metabase:
     image: metabase/metabase:v0.54.15
-    container_name: mb-app
-    restart: unless-stopped
+    labels:
+      rlgym.ephemeral: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,10 +77,15 @@ services:
       # /app is root-owned 755, so Metabase hits AccessDeniedException and silently falls
       # back to a temp dir. /plugins is 777 in the image, which is why the default works.
       # Metabase rewrites the sample database's path on startup when it has moved, so the
-      # restored row is expected to self-heal to /plugins -- verified post-restore in
-      # PROGRESS.md rather than assumed.
+      # restored row self-heals to /plugins.
+      #
+      # Because /plugins is NOT volume-mounted, the H2 sample database lives in the
+      # container's writable layer -- so every fresh container extracts a pristine copy
+      # from the image. Per-attempt isolation of the analytics data is free.
     ports:
-      - "3000:3000"
+      # Required, and deliberately with no default: silently falling back to 3000 would
+      # collide the moment two stacks run at once.
+      - "${MB_HOST_PORT:?MB_HOST_PORT is required (set by rlgym.gym_stack)}:3000"
     healthcheck:
       test: ["CMD-SHELL", "curl --fail -I http://localhost:3000/api/health || exit 1"]
       interval: 10s

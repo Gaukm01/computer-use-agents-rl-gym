@@ -74,7 +74,7 @@ def stub_executor(monkeypatch, outcomes, record=None, barrier=None):
         if barrier is not None:
             barrier()
         status = outcomes.get(
-            (task.id, attempt_index), AttemptStatus.COMPLETED_INCORRECT
+            (task.id, attempt_index), AttemptStatus.ANSWERED
         )
         with lock:
             live["now"] -= 1
@@ -85,9 +85,9 @@ def stub_executor(monkeypatch, outcomes, record=None, barrier=None):
             attempt_id=artifact.attempt_id,
             task_id=task.id,
             verdict="pass"
-            if artifact.status is AttemptStatus.COMPLETED_CORRECT
+            if artifact.status is AttemptStatus.CORRECT
             else "not_graded"
-            if artifact.status is AttemptStatus.ERRORED
+            if artifact.status is AttemptStatus.NOT_OBSERVED
             else "fail",
             reward=artifact.reward,
             evaluated_at=datetime.now(timezone.utc),
@@ -106,9 +106,9 @@ def stub_executor(monkeypatch, outcomes, record=None, barrier=None):
 
 def summary(index: int, reward: int | None) -> AttemptSummary:
     status = {
-        1: AttemptStatus.COMPLETED_CORRECT,
-        0: AttemptStatus.COMPLETED_INCORRECT,
-        None: AttemptStatus.ERRORED,
+        1: AttemptStatus.CORRECT,
+        0: AttemptStatus.ANSWERED,
+        None: AttemptStatus.NOT_OBSERVED,
     }[reward]
     return AttemptSummary(
         attempt_id=f"a{index}",
@@ -203,10 +203,10 @@ def test_job_aggregates_mixed_outcomes(monkeypatch) -> None:
     stub_executor(
         monkeypatch,
         {
-            ("problem10", 0): AttemptStatus.COMPLETED_CORRECT,
-            ("problem10", 1): AttemptStatus.COMPLETED_INCORRECT,
-            ("problem5", 0): AttemptStatus.ERRORED,
-            ("problem5", 1): AttemptStatus.ERRORED,
+            ("problem10", 0): AttemptStatus.CORRECT,
+            ("problem10", 1): AttemptStatus.ANSWERED,
+            ("problem5", 0): AttemptStatus.NOT_OBSERVED,
+            ("problem5", 1): AttemptStatus.NOT_OBSERVED,
             ("problem6", 0): AttemptStatus.MAX_STEPS_EXCEEDED,
             ("problem6", 1): AttemptStatus.TIMED_OUT,
         },
@@ -243,7 +243,7 @@ def test_resume_skips_completed_attempts(monkeypatch) -> None:
 
     # The stub never wrote artifact.json, so simulate what a real run leaves behind.
     for task_id in TASK_IDS:
-        artifact = make_artifact(task_id, 0, job.spec.job_id, AttemptStatus.COMPLETED_CORRECT)
+        artifact = make_artifact(task_id, 0, job.spec.job_id, AttemptStatus.CORRECT)
         executor.write_artifact(
             artifact, executor.attempt_dir(artifact.attempt_id, job.spec.job_id)
         )

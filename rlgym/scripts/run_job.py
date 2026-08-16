@@ -44,7 +44,7 @@ def render(job: JobResult) -> None:
     print(
         f"{BOLD}scope{RESET}        {len(spec.task_ids)} task(s) x "
         f"{spec.attempts_per_task} attempt(s) = {spec.total_attempts}, "
-        f"concurrency {spec.concurrency}"
+        f"concurrency {spec.concurrency} (each attempt gets its own gym)"
     )
     if job.duration_s:
         print(f"{BOLD}duration{RESET}     {job.duration_s:.0f}s")
@@ -76,7 +76,7 @@ def render(job: JobResult) -> None:
         )
     if job.errored:
         print(
-            f"{YELLOW}{job.errored} attempt(s) ERRORED -- excluded from pass@k, "
+            f"{YELLOW}{job.errored} attempt(s) NOT OBSERVED -- excluded from pass@k, "
             f"not counted as failures{RESET}"
         )
     print()
@@ -102,13 +102,12 @@ def main() -> int:
         "--concurrency",
         type=int,
         default=3,
-        help="Parallel attempts. Bounded by API rate limits, not RAM.",
+        help="Parallel attempts, each with its own gym. Capped at ports.MAX_GYMS (memory-bound).",
     )
     parser.add_argument("--model", default=None)
     parser.add_argument("--hint", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--timeout", type=int, default=None)
-    parser.add_argument("--gym-url", default="http://localhost:3000")
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--resume", default=None, metavar="JOB_ID")
@@ -132,7 +131,6 @@ def main() -> int:
                 hint=args.hint,
                 max_steps=args.max_steps,
                 timeout_s=args.timeout,
-                gym_url=args.gym_url,
                 headless=not args.headed,
                 record_video=not args.no_video,
                 tasks_file=args.tasks_file,

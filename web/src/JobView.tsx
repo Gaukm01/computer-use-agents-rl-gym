@@ -7,19 +7,30 @@ const POLL_MS = 3000;
 
 function attemptChipClass(attempt: AttemptSummary): string {
   if (attempt.status === "COMPLETED_CORRECT") return "chip chip-pass";
-  if (attempt.status === "ERRORED") return "chip chip-warn";
+  if (attempt.status === "NOT_OBSERVED") return "chip chip-warn";
   if (attempt.status === "IN_PROGRESS" || attempt.status === "QUEUED")
     return "chip chip-running";
   return "chip chip-fail";
+}
+
+/** Phase is what makes the ~2 minutes of provisioning legible instead of looking hung. */
+function phaseLabel(attempt: AttemptSummary): string | null {
+  if (attempt.status === "IN_PROGRESS" || attempt.status === "QUEUED") {
+    return attempt.phase.toLowerCase();
+  }
+  if (attempt.status === "NOT_OBSERVED" && attempt.phase !== "DONE") {
+    return `failed in ${attempt.phase.toLowerCase()}`;
+  }
+  return null;
 }
 
 function attemptChipLabel(attempt: AttemptSummary): string {
   switch (attempt.status) {
     case "COMPLETED_CORRECT":
       return "Passed";
-    case "ERRORED":
+    case "NOT_OBSERVED":
       // Deliberately not "Failed": reward is null and it's out of the pass@k denominator.
-      return "Errored";
+      return "Not observed";
     case "MAX_STEPS_EXCEEDED":
       return "Max steps";
     case "TIMED_OUT":
@@ -97,6 +108,9 @@ function TaskCard({
                   {attempt.status === "COMPLETED_CORRECT" ? "✓" : "✗"}{" "}
                   {attemptChipLabel(attempt)}
                 </span>
+                {phaseLabel(attempt) && (
+                  <span style={{ opacity: 0.7 }}>· {phaseLabel(attempt)}</span>
+                )}
               </button>
             ))}
             {task.attempts.length === 0 && (
@@ -225,13 +239,13 @@ export function JobView({ jobId, onBack }: { jobId: string; onBack: () => void }
 
           {job.errored > 0 && (
             <div style={{ marginTop: 14, fontSize: 12 }} className="muted">
-              {job.errored} attempt(s) errored — excluded from pass@k rather than counted
-              as failures, since their outcome was never observed.
+              {job.errored} attempt(s) not observed — excluded from pass@k rather than
+              counted as failures, since their outcome was never seen.
             </div>
           )}
           <div style={{ marginTop: 10, fontSize: 12 }} className="muted">
             {job.spec.task_ids.length} task(s) × {job.spec.attempts_per_task} attempt(s) ·
-            concurrency {job.spec.concurrency} · {job.spec.agent_config.model} ·{" "}
+            concurrency {job.spec.concurrency} (own gym each) · {job.spec.agent_config.model} ·{" "}
             {job.spec.limits.max_steps} steps / {job.spec.limits.timeout_s}s budget
             {job.spec.tasks_file ? ` · ${job.spec.tasks_file.split("/").pop()}` : ""}
           </div>
