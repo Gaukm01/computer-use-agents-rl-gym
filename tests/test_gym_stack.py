@@ -173,3 +173,75 @@ def test_mint_session_without_credentials_is_an_auth_error(monkeypatch) -> None:
     monkeypatch.delenv("METABASE_PASSWORD", raising=False)
     with pytest.raises(gym_stack.GymAuthError, match="METABASE_EMAIL"):
         gym_stack.mint_session("http://localhost:3001")
+
+
+# ----------------------------------------------------------------------------------------
+# Teardown must be VERIFIED, not assumed -- the actual cause of the production leak
+# ----------------------------------------------------------------------------------------
+
+
+def test_failed_teardown_is_detected_and_reported(monkeypatch) -> None:
+    """The original bug: `compose down -v` ran, failed, and its exit code was ignored, so
+    six containers survived and nothing noticed. The port then returned to the pool still
+    bound, which is how one bad attempt poisons every later one."""
+    monkeypatch.setattr(
+        gym_stack, "_compose", lambda *a, **k: fake_result(returncode=1, stderr="i/o error")
+    )
+    # Containers stubbornly remain, however hard we try.
+    monkeypatch.setattr(gym_stack, "_project_containers", lambda project: ["abc123"])
+    monkeypatch.setattr(gym_stack, "_run", lambda *a, **k: fake_result(returncode=1, stderr="i/o error"))
+
+    error = gym_stack._teardown("rlgym-t-a0-dead", 3001)
+    assert error is not None, "a failed teardown must not report success"
+    assert "teardown incomplete" in error
+    assert "3001" in error, "the port matters -- it is what the next attempt will collide on"
+
+
+def test_successful_teardown_reports_no_error(monkeypatch) -> None:
+    monkeypatch.setattr(gym_stack, "_compose", lambda *a, **k: fake_result())
+    monkeypatch.setattr(gym_stack, "_project_containers", lambda project: [])
+    monkeypatch.setattr(gym_stack, "_run", lambda *a, **k: fake_result(stdout=""))
+    assert gym_stack._teardown("rlgym-t-a0-beef", 3001) is None
+
+
+def test_teardown_escalates_to_force_remove(monkeypatch) -> None:
+    """compose down failing is not the end -- go at the containers directly."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(gym_stack, "_compose", lambda *a, **k: fake_result(returncode=1))
+    seen = {"n": 0}
+
+    def containers(project):
+        seen["n"] += 1
+        return ["abc123"] if seen["n"] <= 3 else []   # gone once force-removed
+
+    monkeypatch.setattr(gym_stack, "_project_containers", containers)
+    monkeypatch.setattr(
+        gym_stack, "_run", lambda args, **k: (calls.append(args), fake_result(stdout=""))[1]
+    )
+
+    error = gym_stack._teardown("rlgym-t-a0-cafe", 3002)
+    assert any(a[:3] == ["docker", "rm", "-f"] for a in calls), "never tried a force remove"
+    assert error is None
+
+
+def test_teardown_failure_does_not_mask_the_attempt_result(tmp_path, monkeypatch) -> None:
+    """A leaked stack is an operational problem, not the agent's -- the attempt's own
+    outcome must still surface."""
+    monkeypatch.setattr(gym_stack, "_wait_postgres_healthy", lambda *a, **k: None)
+    monkeypatch.setattr(gym_stack, "_restore_dump", lambda *a, **k: None)
+    monkeypatch.setattr(gym_stack, "_wait_metabase_ready", lambda *a, **k: None)
+    monkeypatch.setattr(gym_stack, "mint_session", lambda url: "tok")
+    monkeypatch.setattr(service, "check_auth", lambda *a, **k: (True, True, "ok"))
+    monkeypatch.setattr(gym_stack, "_assert_pristine", lambda *a, **k: {"recent_views": 73})
+    monkeypatch.setattr(gym_stack, "_compose", lambda *a, **k: fake_result())
+    monkeypatch.setattr(gym_stack, "_teardown", lambda p, port: "teardown incomplete: 1 container")
+
+    reported: list[str] = []
+    with gym_stack.ephemeral_gym(
+        "t-a0-feed",
+        storage_state_path=tmp_path / "s.json",
+        on_teardown_error=reported.append,
+    ) as (url, _state):
+        assert url.startswith("http://localhost:")
+
+    assert reported and "teardown incomplete" in reported[0]

@@ -345,6 +345,13 @@ def execute_attempt(
     def on_pristine(counts: dict[str, int]) -> None:
         pending.pristine_counts = counts
 
+    def on_teardown_error(message: str) -> None:
+        # Recorded on whichever artifact exists by then; teardown runs after the worker
+        # has already written its own result, so re-read and amend rather than clobber.
+        final = read_artifact(out_dir) or pending
+        final.teardown_error = message
+        write_artifact(final, out_dir)
+
     def fail(reason: StopReason, message: str) -> AttemptArtifact:
         pending.status = AttemptStatus.NOT_OBSERVED
         pending.stop_reason = reason
@@ -365,6 +372,7 @@ def execute_attempt(
             storage_state_path=storage_state_path,
             on_phase=on_phase,
             on_pristine=on_pristine,
+            on_teardown_error=on_teardown_error,
         ) as (gym_url, storage_state):
             pending.gym_url = gym_url
             write_artifact(pending, out_dir)

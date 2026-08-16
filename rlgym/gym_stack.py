@@ -233,6 +233,67 @@ def write_storage_state(token: str, path: pathlib.Path) -> pathlib.Path:
     return path
 
 
+def _project_containers(project: str) -> list[str]:
+    """Container ids still belonging to this compose project. The ground truth for whether
+    teardown actually happened -- an exit code is not."""
+    found = _run(
+        ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"],
+        timeout=60,
+    )
+    return found.stdout.split()
+
+
+def _teardown(project: str, port: int) -> str | None:
+    """Destroy the stack and *verify* it is gone. Returns an error string if it is not.
+
+    The original version fired `compose down -v` and ignored the result. When the host disk
+    filled, `down` failed, six containers survived, and nothing noticed -- and because the
+    port returns to the pool regardless, the next attempt to claim it would have hit
+    "port already allocated". Silent teardown failure is how one bad attempt poisons a job.
+
+    Escalates: down -> down again -> force-remove by label -> report.
+    """
+    attempts = [
+        ("down", lambda: _compose(project, "down", "-v", "--remove-orphans", port=port, timeout=180)),
+        # A retry genuinely helps: under load the daemon can be transiently busy.
+        ("down (retry)", lambda: _compose(project, "down", "-v", "--remove-orphans", port=port, timeout=180)),
+    ]
+    last_error = ""
+    for _label, action in attempts:
+        result = action()
+        if result.returncode != 0:
+            last_error = (result.stderr or "").strip()[-300:]
+        if not _project_containers(project):
+            break
+    else:
+        pass
+
+    remaining = _project_containers(project)
+    if remaining:
+        # Compose could not do it; go at the containers directly.
+        forced = _run(["docker", "rm", "-f", *remaining], timeout=180)
+        if forced.returncode != 0:
+            last_error = (forced.stderr or "").strip()[-300:] or last_error
+
+    # Volumes are named <project>_pgdata and are NOT removed by `docker rm`.
+    volumes = _run(["docker", "volume", "ls", "-q"], timeout=60)
+    stale = [v for v in volumes.stdout.split() if v.startswith(f"{project}_")]
+    if stale:
+        _run(["docker", "volume", "rm", "-f", *stale], timeout=180)
+
+    still_there = _project_containers(project)
+    leftover_volumes = [
+        v for v in _run(["docker", "volume", "ls", "-q"], timeout=60).stdout.split()
+        if v.startswith(f"{project}_")
+    ]
+    if still_there or leftover_volumes:
+        return (
+            f"teardown incomplete: {len(still_there)} container(s), "
+            f"{len(leftover_volumes)} volume(s) remain on port {port}. {last_error}".strip()
+        )
+    return None
+
+
 def _assert_pristine(project: str, port: int) -> dict[str, int]:
     """Prove the attempt starts from the seeded state, rather than assuming it.
 
@@ -276,6 +337,7 @@ def ephemeral_gym(
     storage_state_path: pathlib.Path,
     on_phase: PhaseCallback | None = None,
     on_pristine: Callable[[dict[str, int]], None] | None = None,
+    on_teardown_error: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[str, pathlib.Path]]:
     """Yield (gym_url, storage_state_path) for a stack that exists only inside this block."""
 
@@ -325,8 +387,18 @@ def ephemeral_gym(
 
             yield gym_url, storage_state_path
         finally:
-            # Unconditional: a leaked stack holds ~1.1 GiB and its port forever.
-            _compose(project, "down", "-v", "--remove-orphans", port=port, timeout=180)
+            # Unconditional AND verified: a leaked stack holds ~1.1 GiB and keeps its port
+            # bound, so the next attempt that claims that port cannot start.
+            try:
+                teardown_error = _teardown(project, port)
+            except Exception as exc:  # noqa: BLE001 -- never mask the attempt's own outcome
+                teardown_error = f"teardown raised {type(exc).__name__}: {exc}"
+            if teardown_error:
+                # Reported, never raised: the attempt's real result must survive.
+                if on_teardown_error:
+                    on_teardown_error(teardown_error)
+                else:
+                    print(f"[gym_stack] {teardown_error}", flush=True)
 
 
 # ======================================================================================

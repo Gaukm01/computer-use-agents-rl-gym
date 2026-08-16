@@ -235,6 +235,12 @@ class AttemptArtifact(BaseModel):
     # gym_stack._assert_pristine). Evidence rather than assertion.
     pristine_counts: dict[str, int] | None = None
 
+    # Set when the ephemeral stack could not be destroyed. Does NOT change the attempt's
+    # status -- the agent's result is still valid -- but a leaked stack keeps its port
+    # bound, so the next attempt claiming that port will fail to start. Surfaced here
+    # because silent teardown failure is how one bad attempt poisons a whole job.
+    teardown_error: str | None = None
+
     started_at: datetime | None = None
     ended_at: datetime | None = None
     duration_s: float | None = None
