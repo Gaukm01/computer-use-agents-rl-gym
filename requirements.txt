@@ -1,12 +1,30 @@
-# Our own dependencies, on top of the vendored clone's requirements.
+# Every Python dependency for this project, in one file.
 #
-#   agent/.venv/bin/pip install -r agent/computer-use-preview/requirements.txt
+#   python3.12 -m venv agent/.venv
 #   agent/.venv/bin/pip install -r requirements.txt
+#   agent/.venv/bin/playwright install chromium
 #
-# The clone supplies google-genai, playwright, pydantic, python-dotenv and pytest;
-# everything below is what the platform layer adds.
+# This is a superset of agent/computer-use-preview/requirements.txt, deliberately: that
+# clone is git-ignored (it has its own history), so a fresh `git clone` of this repo does
+# not carry it and cannot be installed from it. Versions below are the ones the platform
+# was actually verified on.
 
+# ---- required by the vendored computer-use-preview clone ----------------------------
+google-genai==2.8.0
+playwright==1.55.0
+pydantic==2.12.0
+python-dotenv==1.0.1
+termcolor==3.1.0
+rich==15.0.0
+# Unused at runtime -- we drive Playwright locally -- but computers/__init__.py imports
+# BrowserbaseComputer unconditionally, so `from computers import EnvState` needs it.
+browserbase==1.4.0
+
+# ---- the platform layer -------------------------------------------------------------
 fastapi==0.141.1
 uvicorn[standard]==0.52.3
 # Required by FastAPI for multipart/form-data -- the tasks.json upload endpoint.
 python-multipart==0.0.32
+
+# ---- tests --------------------------------------------------------------------------
+pytest==9.1.1
