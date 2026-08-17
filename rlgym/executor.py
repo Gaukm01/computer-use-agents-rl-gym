@@ -139,10 +139,29 @@ def read_artifact(out_dir: pathlib.Path) -> AttemptArtifact | None:
         return None
 
 
+# Stated at the top of the first turn. Environment facts only.
+#
+# Without it the first message is the bare task, so a run opens by working out what it is
+# looking at and whether it has to sign in -- budget spent discovering the setup rather than
+# on the analysis being measured.
+#
+# Does not name the product, say where anything is, or describe the answer's shape:
+# SUBMIT_INSTRUCTION owns that, and choosing the shape stays part of the task.
+TASK_PREAMBLE = (
+    "The app is already loaded in the browser and authenticated. Navigate it with the "
+    "computer to complete the task, then provide the answer in valid JSON using the "
+    "submit_answer tool."
+)
+
+
 def build_prompt(task: Task, agent_config: AgentConfig) -> str:
-    """The task text, plus an optional hint. The submit-answer contract is appended by
-    the agent itself, since it describes that agent's tooling."""
-    prompt = task.task
+    """Environment context, the task, and an optional hint.
+
+    The submit-answer contract is appended by the agent itself, since it describes that
+    agent's tooling. The preamble lives here instead because it describes the *gym*, and is
+    true whichever agent is driving it.
+    """
+    prompt = f"{TASK_PREAMBLE}\n\nYour task is: {task.task}"
     if agent_config.hint:
         prompt = f"{prompt}\n\nHint: {agent_config.hint}"
     return prompt

@@ -277,3 +277,28 @@ def test_the_answer_envelope_reaches_the_grader_intact(monkeypatch, tmp_path) ->
         [model_turn(SUBMIT_ANSWER, {ANSWER_KEY: '{"answer": {"avg_rating": 3.15}}'})],
     )
     assert result.submitted_answer == {"answer": {"avg_rating": 3.15}}
+
+
+def test_preamble_states_the_environment_and_nothing_about_the_task() -> None:
+    """The opening turn used to be the bare task, so every run spent its first steps
+    working out what it was looking at and whether it had to sign in. The preamble states
+    the three facts the agent cannot infer and we already know -- and nothing else.
+    """
+    from rlgym.executor import TASK_PREAMBLE, build_prompt
+    from rlgym.tasks import load_task_map
+
+    text = TASK_PREAMBLE.lower()
+    # The facts worth stating.
+    assert "already loaded" in text and "authenticated" in text
+
+    # Not the product name: recognising the UI is something to read off the page, not to be
+    # handed. Not the answer's shape either -- SUBMIT_INSTRUCTION owns that, and choosing it
+    # is part of the task.
+    for leak in ("metabase", "postgres", "sql", "query builder", "avg", "column", "table"):
+        assert leak not in text, f"preamble leaks environment detail: {leak!r}"
+
+    task = load_task_map()["problem1"]
+    prompt = build_prompt(task, AgentConfig())
+    # The task still arrives verbatim, and after the context rather than buried in it.
+    assert task.task in prompt
+    assert prompt.index(TASK_PREAMBLE) < prompt.index(task.task)
