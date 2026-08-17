@@ -58,9 +58,28 @@ same way minus step 1's colima specifics.
 
 ### Prerequisites
 
-- **Docker** — colima on macOS, Docker Desktop, or native Linux Docker
-- **Python 3.12** (verified on 3.12.13)
-- **Node 18+** — only to build the console; Vite 5 will not run on Node 14/16
+**macOS** — via [Homebrew](https://brew.sh):
+
+```bash
+# skip this line if you already have Homebrew
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+brew install colima docker docker-compose    # Docker daemon, CLI, and `docker compose`
+brew install python@3.12
+brew install node                            # or: nvm install 18 && nvm use 18
+```
+
+**Linux** — install `docker`, `docker-compose-plugin`, `python3.12` and `nodejs` (18+) from
+your package manager. colima is not needed; skip it in step 1.
+
+Confirm all three before continuing. Node **must** be 18+ — Vite 5 fails on 14/16:
+
+```bash
+docker --version && python3.12 --version && node --version
+```
+
+Also needed:
+
 - **~10 GiB free host disk**, and **≥8 GiB RAM available to the Docker VM**
 - A **Gemini API key** ([aistudio.google.com/apikey](https://aistudio.google.com/apikey))
 - **Metabase credentials** for a user that exists inside the provided environment dump
