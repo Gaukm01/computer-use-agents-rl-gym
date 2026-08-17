@@ -1,0 +1,35 @@
+{
+  "attempt_id": "problem4-a1-40a3eb70",
+  "job_id": "job-20260817-140645-64909b",
+  "attempt_index": 1,
+  "task": {
+    "id": "problem4",
+    "task": "Retrieve the first name, last name, and email of the account with the highest total invoice payment amount. Return in the format {first_name: str, last_name: str, email: str, sum: number}.",
+    "answer": "{\n  \"sum\": 101203.3,\n  \"email\": \"oda.yost@hotmail.example\",\n  \"last_name\": \"Yost\",\n  \"first_name\": \"Oda\"\n}",
+    "max_steps": null,
+    "timeout_s": null
+  },
+  "agent_config": {
+    "agent_type": "gemini_computer_use",
+    "model": "gemini-3.6-flash",
+    "hint": null,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 40,
+    "budget_reminders": true,
+    "prohibited_actions": []
+  },
+  "limits": {
+    "max_steps": 50,
+    "timeout_s": 600
+  },
+  "out_dir": "/Users/gkumar/assessments/hackathon/runs/job-20260817-140645-64909b/problem4-a1-40a3eb70",
+  "gym_url": "http://localhost:3002",
+  "storage_state": "/Users/gkumar/assessments/hackathon/runs/job-20260817-140645-64909b/problem4-a1-40a3eb70/storage_state.json",
+  "headless": true,
+  "record_video": true,
+  "pristine_counts": {
+    "recent_views": 73,
+    "report_card": 86
+  }
+}

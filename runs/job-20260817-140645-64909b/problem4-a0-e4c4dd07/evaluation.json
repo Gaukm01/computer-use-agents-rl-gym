@@ -1,0 +1,22 @@
+{
+  "attempt_id": "problem4-a0-e4c4dd07",
+  "task_id": "problem4",
+  "expected_output": {
+    "sum": 101203.3,
+    "email": "oda.yost@hotmail.example",
+    "last_name": "Yost",
+    "first_name": "Oda"
+  },
+  "actual_output": {
+    "first_name": "Oda",
+    "last_name": "Yost",
+    "email": "oda.yost@hotmail.example",
+    "sum": 101203.3
+  },
+  "verdict": "pass",
+  "reward": 1,
+  "diff": null,
+  "near_miss": false,
+  "evaluated_at": "2026-08-17T14:24:36.483610Z",
+  "evaluator_version": "1.1.0"
+}

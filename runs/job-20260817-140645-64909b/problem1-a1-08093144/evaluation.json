@@ -1,0 +1,36 @@
+{
+  "attempt_id": "problem1-a1-08093144",
+  "task_id": "problem1",
+  "expected_output": {
+    "ratings": [
+      4.6,
+      5,
+      5
+    ],
+    "product_titles": [
+      "Rustic Paper Wallet",
+      "Ergonomic Wool Bag",
+      "Lightweight Linen Hat"
+    ]
+  },
+  "actual_output": {
+    "answer": {
+      "product_titles": [
+        "Rustic Paper Wallet",
+        "Ergonomic Wool Bag",
+        "Lightweight Linen Hat"
+      ],
+      "ratings": [
+        4.6,
+        5,
+        5
+      ]
+    }
+  },
+  "verdict": "pass",
+  "reward": 1,
+  "diff": null,
+  "near_miss": false,
+  "evaluated_at": "2026-08-17T14:11:23.814017Z",
+  "evaluator_version": "1.1.0"
+}

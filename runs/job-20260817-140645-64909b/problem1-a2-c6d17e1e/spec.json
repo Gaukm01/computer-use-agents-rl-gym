@@ -1,0 +1,35 @@
+{
+  "attempt_id": "problem1-a2-c6d17e1e",
+  "job_id": "job-20260817-140645-64909b",
+  "attempt_index": 2,
+  "task": {
+    "id": "problem1",
+    "task": "Retrieve product titles and ratings for products with ratings above '4.5' and price less than '40'. Return in the format {product_titles: list[str], ratings: list[number]}.",
+    "answer": "{\n  \"ratings\": [\n    4.6,\n    5,\n    5\n  ],\n  \"product_titles\": [\n    \"Rustic Paper Wallet\",\n    \"Ergonomic Wool Bag\",\n    \"Lightweight Linen Hat\"\n  ]\n}",
+    "max_steps": null,
+    "timeout_s": null
+  },
+  "agent_config": {
+    "agent_type": "gemini_computer_use",
+    "model": "gemini-3.6-flash",
+    "hint": null,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 40,
+    "budget_reminders": true,
+    "prohibited_actions": []
+  },
+  "limits": {
+    "max_steps": 50,
+    "timeout_s": 600
+  },
+  "out_dir": "/Users/gkumar/assessments/hackathon/runs/job-20260817-140645-64909b/problem1-a2-c6d17e1e",
+  "gym_url": "http://localhost:3001",
+  "storage_state": "/Users/gkumar/assessments/hackathon/runs/job-20260817-140645-64909b/problem1-a2-c6d17e1e/storage_state.json",
+  "headless": true,
+  "record_video": true,
+  "pristine_counts": {
+    "recent_views": 73,
+    "report_card": 86
+  }
+}

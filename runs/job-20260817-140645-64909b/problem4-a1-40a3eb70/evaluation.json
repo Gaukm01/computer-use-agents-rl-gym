@@ -1,0 +1,22 @@
+{
+  "attempt_id": "problem4-a1-40a3eb70",
+  "task_id": "problem4",
+  "expected_output": {
+    "sum": 101203.3,
+    "email": "oda.yost@hotmail.example",
+    "last_name": "Yost",
+    "first_name": "Oda"
+  },
+  "actual_output": {
+    "first_name": "Unknown",
+    "last_name": "Unknown",
+    "email": "unknown@example.com",
+    "sum": 0
+  },
+  "verdict": "fail",
+  "reward": 0,
+  "diff": "sum: expected 101203.3, got 0.0; email: expected 'oda.yost@hotmail.example', got 'unknown@example.com'; last_name: expected 'yost', got 'unknown'; first_name: expected 'oda', got 'unknown'",
+  "near_miss": false,
+  "evaluated_at": "2026-08-17T14:26:40.229988Z",
+  "evaluator_version": "1.1.0"
+}

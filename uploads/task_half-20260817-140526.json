@@ -1,0 +1,27 @@
+[
+  {
+    "id": "problem1",
+    "task": "Retrieve product titles and ratings for products with ratings above '4.5' and price less than '40'. Return in the format {product_titles: list[str], ratings: list[number]}.",
+    "answer": "{\n  \"ratings\": [\n    4.6,\n    5,\n    5\n  ],\n  \"product_titles\": [\n    \"Rustic Paper Wallet\",\n    \"Ergonomic Wool Bag\",\n    \"Lightweight Linen Hat\"\n  ]\n}"
+  },
+  {
+    "id": "problem2",
+    "task": "Identify the most expensive product in each category ('Doohickey', 'Gadget', 'Gizmo', 'Widget'). Return in the format {Doohickey: str, Gadget: str, Gizmo: str, Widget: str}",
+    "answer": "{\n  \"Gizmo\": \"Small Marble Knife\",\n  \"Gadget\": \"Incredible Aluminum Knife\",\n  \"Widget\": \"Awesome Steel Toucan\",\n  \"Doohickey\": \"Aerodynamic Linen Coat\"\n}"
+  },
+  {
+    "id": "problem3",
+    "task": "Retrieve the name, category, and price of the product that has been ordered exactly 100 times and has the lowest price. Return in the format {product: str, category: str, price: number}.",
+    "answer": "{\n  \"price\": 19.87,\n  \"product\": \"Rustic Paper Car\",\n  \"category\": \"Doohickey\"\n}"
+  },
+  {
+    "id": "problem4",
+    "task": "Retrieve the first name, last name, and email of the account with the highest total invoice payment amount. Return in the format {first_name: str, last_name: str, email: str, sum: number}.",
+    "answer": "{\n  \"sum\": 101203.3,\n  \"email\": \"oda.yost@hotmail.example\",\n  \"last_name\": \"Yost\",\n  \"first_name\": \"Oda\"\n}"
+  },
+  {
+    "id": "problem5",
+    "task": "Calculate the average rating for products in the 'Widget' category. Return in the format {avg_rating: number}.",
+    "answer": "{\n  \"avg_rating\": 3.15\n}"
+  }
+]

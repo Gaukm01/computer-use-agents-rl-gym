@@ -1,0 +1,16 @@
+{
+  "attempt_id": "problem5-a0-aaa9cb5f",
+  "task_id": "problem5",
+  "expected_output": {
+    "avg_rating": 3.15
+  },
+  "actual_output": {
+    "avg_rating": 3.15
+  },
+  "verdict": "pass",
+  "reward": 1,
+  "diff": null,
+  "near_miss": false,
+  "evaluated_at": "2026-08-17T14:31:19.971573Z",
+  "evaluator_version": "1.1.0"
+}
