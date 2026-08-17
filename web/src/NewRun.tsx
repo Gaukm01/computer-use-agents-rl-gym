@@ -29,15 +29,38 @@ function NumberField({
 }
 
 /** Click-to-open explainer. A `title` tooltip is too easy to miss for something that
- *  determines how long a run takes and how much it costs. */
+ *  determines how long a run takes and how much it costs.
+ *
+ *  Dismissed by clicking anywhere else, or by Escape. Listening on `mousedown` rather than
+ *  `click` means a click on another Info's dot closes this one *before* that one opens, so
+ *  two can never be open at once. */
 function Info({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      if (!wrap.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
-    <span className="info-wrap">
+    <span className="info-wrap" ref={wrap}>
       <button
         type="button"
         className="info-dot"
         aria-label="more information"
+        aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
         i

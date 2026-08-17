@@ -81,7 +81,7 @@ export function Transcript({
   const [detail, setDetail] = useState<AttemptDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
-  const [view, setView] = useState<"steps" | "video">("steps");
+  const [view, setView] = useState<"context" | "steps" | "video">("steps");
 
   useEffect(() => {
     setDetail(null);
@@ -187,6 +187,13 @@ export function Transcript({
       >
         <div className="view-toggle">
           <button
+            className={view === "context" ? "active" : ""}
+            onClick={() => setView("context")}
+            title="The first turn the agent was given"
+          >
+            Context
+          </button>
+          <button
             className={view === "steps" ? "active" : ""}
             onClick={() => setView("steps")}
           >
@@ -207,7 +214,17 @@ export function Transcript({
         </span>
       </div>
 
-      {view === "video" ? (
+      {view === "context" ? (
+        <div className="context-pane">
+          {artifact.initial_prompt ? (
+            <pre className="context-text">{artifact.initial_prompt}</pre>
+          ) : (
+            <span className="muted">
+              no prompt recorded — the worker was killed before it could report one
+            </span>
+          )}
+        </div>
+      ) : view === "video" ? (
         <div className="transcript" style={{ gridTemplateColumns: "1fr" }}>
           <div className="screen-pane">
             {video ? (

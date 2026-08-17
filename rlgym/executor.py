@@ -208,6 +208,7 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
                 artifact.ended_at - artifact.started_at
             ).total_seconds()
         if result is not None:
+            artifact.initial_prompt = result.initial_prompt
             artifact.steps = result.steps
             artifact.step_count = len(result.steps)
             artifact.token_usage = result.token_usage

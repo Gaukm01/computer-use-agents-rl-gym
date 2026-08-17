@@ -25,6 +25,15 @@ class AgentRunResult(BaseModel):
 
     stop_reason: StopReason
 
+    # The complete first turn as sent to the model: the executor's environment preamble and
+    # task, plus whatever contract this agent appended for its own tooling. Reported by the
+    # agent because only the agent knows the finished text -- and recorded because "what were
+    # we actually asking?" is the first question of any transcript review.
+    #
+    # NOT a system prompt: this loop sends it as Content(role="user") and sets no system
+    # instruction anywhere.
+    initial_prompt: str | None = None
+
     # Set when the agent called submit_answer. `raw` is kept verbatim so an unparseable
     # submission is debuggable instead of lost.
     submitted_answer: Any | None = None

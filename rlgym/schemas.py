@@ -302,6 +302,12 @@ class AttemptArtifact(BaseModel):
     actual_output: Any | None = None
     actual_output_raw: str | None = None
 
+    # The exact first turn the agent was given -- environment preamble, task, and the
+    # agent's own answer contract. Stored per attempt so a transcript can be read against
+    # what was actually asked, and so a prompt change is visible in the record rather than
+    # only in git history.
+    initial_prompt: str | None = None
+
     # Trailing model text when it stopped without submitting.
     final_text: str | None = None
 

@@ -152,6 +152,9 @@ export interface AttemptArtifact {
   step_count: number;
   actual_output: unknown;
   actual_output_raw: string | null;
+  /** The exact first turn the agent was given: environment preamble, task, and the agent's
+   *  own answer contract. Not a system prompt -- it is sent as a user turn. */
+  initial_prompt: string | null;
   final_text: string | null;
   error: string | null;
   video_path: string | null;

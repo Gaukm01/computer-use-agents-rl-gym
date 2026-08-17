@@ -178,12 +178,8 @@ class GeminiComputerUseAgent(BrowserAgent):
         self._browser_computer = computer
         screenshot_dir.mkdir(parents=True, exist_ok=True)
 
-        self._contents = [
-            Content(
-                role="user",
-                parts=[Part(text=f"{prompt}\n\n{SUBMIT_INSTRUCTION}")],
-            )
-        ]
+        first_turn = f"{prompt}\n\n{SUBMIT_INSTRUCTION}"
+        self._contents = [Content(role="user", parts=[Part(text=first_turn)])]
 
         steps: list[StepRecord] = []
         totals = TokenUsage()
@@ -200,6 +196,7 @@ class GeminiComputerUseAgent(BrowserAgent):
         ) -> AgentRunResult:
             return AgentRunResult(
                 stop_reason=stop_reason,
+                initial_prompt=first_turn,
                 submitted_answer=submitted,
                 submitted_answer_raw=submitted_raw,
                 final_text=final_text,
