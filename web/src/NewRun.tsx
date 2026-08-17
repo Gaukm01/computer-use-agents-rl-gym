@@ -105,6 +105,8 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
   const [jobs, setJobs] = useState<JobResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Job id of an already-running job, when the Run button needs confirming first.
+  const [confirmKill, setConfirmKill] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   function loadTasks(file: string | null) {
@@ -181,7 +183,21 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
     (Math.ceil(totalAttempts / Math.max(lanes, 1)) * (capSeconds + 35)) / 60,
   );
 
-  async function run() {
+  /** Starting a job runs gym_stack.sweep(), which removes EVERY ephemeral container -- so a
+   *  second job destroys the first one's gyms mid-rollout. The platform is built to run one
+   *  job at a time; this surfaces that rather than fixing it. Re-fetched on click instead of
+   *  trusting the list loaded at mount, or the warning would miss a job started since. */
+  async function run(force = false) {
+    if (!force) {
+      const live = (await api.listJobs().catch(() => [])).find(
+        (j) => j.status === "RUNNING" || j.status === "QUEUED",
+      );
+      if (live) {
+        setConfirmKill(live.spec.job_id);
+        return;
+      }
+    }
+    setConfirmKill(null);
     setBusy(true);
     setError(null);
     try {
@@ -375,10 +391,29 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
             </div>
           )}
 
+          {confirmKill && (
+            <div className="error-box">
+              <b>A job is already running.</b>
+              <div style={{ marginTop: 4 }}>
+                Starting a new one kills{" "}
+                <span className="mono">{confirmKill}</span> — its gyms are torn down
+                mid-rollout. Rollouts it already graded are kept.
+              </div>
+              <div className="btn-row" style={{ marginTop: 10 }}>
+                <button className="btn btn-sm" onClick={() => setConfirmKill(null)}>
+                  Keep the running job
+                </button>
+                <button className="btn btn-sm" onClick={() => run(true)}>
+                  Start anyway
+                </button>
+              </div>
+            </div>
+          )}
+
           <button
             className="btn btn-primary"
             style={{ width: "100%" }}
-            onClick={run}
+            onClick={() => run()}
             disabled={busy || selected.size === 0}
           >
             {busy ? "Starting…" : `Run ${totalAttempts} rollout(s)`}
