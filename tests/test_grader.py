@@ -211,7 +211,7 @@ def test_badly_wrong_number_is_not_near_miss() -> None:
 
 
 def test_errored_is_not_graded_and_reward_is_none() -> None:
-    """ERRORED must NOT become reward 0 -- the outcome was never observed."""
+    """NOT_OBSERVED must NOT become reward 0 -- the outcome was never observed."""
     task = TASKS["problem1"]
     artifact = make_artifact(
         "problem1", status=AttemptStatus.NOT_OBSERVED, error="Gemini 503"
@@ -226,7 +226,7 @@ def test_errored_is_not_graded_and_reward_is_none() -> None:
     "status", [AttemptStatus.MAX_STEPS_EXCEEDED, AttemptStatus.TIMED_OUT]
 )
 def test_budget_exhaustion_is_reward_zero(status: AttemptStatus) -> None:
-    """Running out of budget IS agent failure, unlike ERRORED."""
+    """Running out of budget IS agent failure, unlike NOT_OBSERVED."""
     task = TASKS["problem1"]
     artifact = make_artifact("problem1", status=status)
     result = grader.grade(artifact, task)

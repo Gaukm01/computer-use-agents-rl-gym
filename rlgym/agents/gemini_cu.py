@@ -7,9 +7,9 @@ genuinely different signatures). Everything else is replaced, for four reasons:
 1. **Upstream swallows API failures.** `agent.py` wraps the model call in
    `except Exception: return "COMPLETE"`, so once its internal retries are exhausted a
    Gemini 5xx is indistinguishable from the agent finishing its task. Downstream that becomes
-   COMPLETED_INCORRECT -> reward 0, which makes reward correlate with infrastructure
-   flakiness. Here an exhausted call returns `StopReason.API_ERROR` and the executor maps it
-   to ERRORED (reward `None`, excluded from pass@k).
+   ANSWERED -> reward 0, which makes reward correlate with infrastructure flakiness. Here an
+   exhausted call returns `StopReason.API_ERROR` and the executor maps it to NOT_OBSERVED
+   (reward `None`, excluded from pass@k).
 
 2. **No step cap.** Upstream loops `while status == "CONTINUE"` forever.
 
@@ -364,10 +364,14 @@ class GeminiComputerUseAgent(BrowserAgent):
 
                     payload = {"url": result.url, **extra_fields}
 
-                    # Budget reporting is opt-in and off by default -- see
-                    # AgentConfig.budget_reminders. When off the agent sees only the page
-                    # it is looking at, so managing its own step budget is part of the
-                    # task rather than something we hand it.
+                    # Budget reporting is ON by default -- see AgentConfig.budget_reminders,
+                    # exposed in the console as "Step-budget awareness". Turning it off is the
+                    # ablation: the agent then sees only the page it is looking at, and
+                    # managing the budget becomes part of the task.
+                    #
+                    # Measured 2026-08-17, worth knowing before trusting it: two rollouts ran
+                    # to the 50-step cap and submitted nothing while being warned from step 42
+                    # on. The reminder did not rescue the case it was built for.
                     if self._config.budget_reminders:
                         remaining = max_steps - len(steps) - 1
                         payload["steps_remaining"] = remaining

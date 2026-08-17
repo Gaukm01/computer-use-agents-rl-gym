@@ -5,8 +5,9 @@ treat them as a wire format: add fields, don't repurpose them.
 
 The central design point is `AttemptStatus` and how reward derives from it. Reward is NOT
 something the agent or the executor decides -- it falls out of the terminal status, with one
-deliberate asymmetry: ERRORED yields `None`, not 0. An ERRORED attempt means *we failed to
-observe an outcome* (API exhausted, browser crashed, gym unreachable), which is categorically
+deliberate asymmetry: NOT_OBSERVED yields `None`, not 0. A NOT_OBSERVED attempt means *we
+failed to observe an outcome* (API exhausted, browser crashed, gym would not provision),
+which is categorically
 different from the agent failing. Scoring it 0 would make reward correlate with infrastructure
 flakiness and quietly bias any dataset built from these artifacts.
 """
@@ -391,9 +392,14 @@ class JobSpec(BaseModel):
     # Defaults to 1 so an exploratory job is cheap; pass 3+ for pass@k.
     attempts_per_task: int = 1
 
-    # Bounded by one API key's rate limits, not by RAM. Each attempt is its own
-    # subprocess, and the browser runs host-side, so memory stays flat as this grows.
-    concurrency: int = 3
+    # Bounded by RAM, not by API rate limits: every attempt holds its own Metabase (~1.1
+    # GiB), so ports.MAX_GYMS caps this at 3. This was the opposite while gyms were shared,
+    # and the old comment survived the change -- ports.py has said the correct thing since.
+    #
+    # Defaults to 1 to match every entry point (the API, both CLIs, the console). A library
+    # caller used to get 3 here while the CLI gave 1, which is a trap for anyone scripting
+    # against service.submit_job().
+    concurrency: int = 1
 
     agent_config: AgentConfig = Field(default_factory=AgentConfig)
     limits: Limits = Field(default_factory=Limits)

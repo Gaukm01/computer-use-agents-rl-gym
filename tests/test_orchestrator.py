@@ -2,7 +2,7 @@
 
 The executor is stubbed out, so these run in milliseconds with no API calls and no
 browser. What's under test is the batching, aggregation and resume logic -- and above all
-that ERRORED attempts are excluded from pass@k rather than counted as failures, which is
+that NOT_OBSERVED attempts are excluded from pass@k rather than counted as failures, which is
 the property that keeps a job's headline number honest.
 
 Stubbing works cleanly because the orchestrator calls `executor.execute_attempt()` through
@@ -61,8 +61,8 @@ def make_artifact(task_id, attempt_index, job_id, status) -> AttemptArtifact:
 def stub_executor(monkeypatch, outcomes, record=None, barrier=None):
     """Replace the executor with a deterministic stub.
 
-    `outcomes` maps (task_id, attempt_index) -> AttemptStatus, defaulting to
-    COMPLETED_INCORRECT for anything unlisted.
+    `outcomes` maps (task_id, attempt_index) -> AttemptStatus, defaulting to ANSWERED for
+    anything unlisted.
     """
     live = {"now": 0, "max": 0}
     lock = threading.Lock()
@@ -218,7 +218,7 @@ def test_job_aggregates_mixed_outcomes(monkeypatch) -> None:
     assert by_id["problem5"].valid_attempts == 0
     assert by_id["problem5"].pass_rate is None
 
-    # Budget exhaustion IS agent failure, unlike ERRORED.
+    # Budget exhaustion IS agent failure, unlike NOT_OBSERVED.
     assert by_id["problem6"].failed == 2
     assert by_id["problem6"].errored == 0
 

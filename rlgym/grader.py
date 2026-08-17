@@ -277,7 +277,8 @@ def compare_outputs(expected: Any, actual: Any) -> ComparisonOutcome:
 def grade(artifact: AttemptArtifact, task: Task) -> EvaluationResult:
     """Produce a verdict for one attempt.
 
-    Only COMPLETED_* attempts are compared. Every other terminal status already carries
+    Only attempts in GRADEABLE_STATUSES (COMPLETED_CORRECT, ANSWERED) are compared. Every
+    other terminal status already carries
     its reward: MAX_STEPS_EXCEEDED and TIMED_OUT are agent failures (0), NOT_OBSERVED means the
     outcome was never observed (None) and must not be scored as a failure.
     """

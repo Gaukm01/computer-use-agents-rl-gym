@@ -98,9 +98,10 @@ def check_auth(
     browser to try it would cost seconds on an endpoint the UI polls.
 
     Hitting Metabase's REST API here does not weaken the visual-only rule: that constrains
-    the *agent*, not the harness. This is the same category as the grader querying
-    Postgres directly -- infrastructure checking itself, never the policy perceiving its
-    environment.
+    the *agent*, not the harness -- infrastructure checking itself, never the policy
+    perceiving its environment. (An earlier version of this note cited "the grader querying
+    Postgres directly" as the precedent. The grader has never done that: grade() is a pure
+    function of (artifact, task) with no database access at all.)
     """
     import urllib.error
     import urllib.request
@@ -287,7 +288,7 @@ def submit_job(
     task_ids: list[str] | None = None,
     *,
     attempts_per_task: int = 1,
-    concurrency: int = 3,
+    concurrency: int = 1,
     agent: AgentConfig | None = None,
     model: str | None = None,
     hint: str | None = None,

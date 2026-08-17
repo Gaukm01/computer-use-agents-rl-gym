@@ -305,8 +305,8 @@ def _teardown(project: str, port: int) -> str | None:
 # reports 0 B -- they are the same filesystem, and this is the path Docker actually writes to.
 TRIM_TARGET = "/var/lib/docker"
 
-# fstrim walks the whole filesystem's free-block bitmap, so concurrent calls from the three
-# slots would duplicate the same work. Serialised rather than deduplicated: a second trim is
+# fstrim walks the whole filesystem's free-block bitmap, so concurrent calls from the
+# parallel slots (up to ports.MAX_GYMS) would duplicate the same work. Serialised rather than deduplicated: a second trim is
 # cheap (<1s) and a lock is simpler than tracking who trimmed when.
 _trim_lock = threading.Lock()
 

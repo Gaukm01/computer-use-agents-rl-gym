@@ -13,11 +13,14 @@ per attempt and blocks waiting on it, so the pool only needs to supervise. Threa
 therefore correct despite the GIL -- they are parked in `Popen.wait()`, not computing --
 and Playwright never runs in this process, which is what would have made threads unusable.
 
-**Attempts are ordered task-major**: a task's K attempts all run before the next task
-starts. A job that is halfway done then has *complete* results for half the tasks --
-pass@k for those tasks is final and usable -- rather than one sample of every task, where
-no task's pass@k is settled and nothing can be relied on until the whole job finishes.
-Finished work you can use beats uniform progress you can't.
+**Attempts are ordered task-major**: a task's K attempts are all submitted before the next
+task's, so its pass@k settles as early as possible. A job that is halfway done then has
+*complete* results for some tasks -- final and usable -- rather than one sample of every task,
+where nothing is settled until the whole job finishes.
+
+This orders SUBMISSION, not execution: there is no barrier between tasks, so a task's last
+rollout overlaps the next task's first. It also means concurrent attempts do identical work
+at identical times, where attempt-major staggered them across different tasks.
 
 **Job state covers attempts that have not run yet.** `job.json` carries a row for every one
 of the T x K attempts from the moment the job starts, so the UI can show the full grid with
@@ -235,7 +238,7 @@ def build_spec(
     task_ids: list[str],
     *,
     attempts_per_task: int = 1,
-    concurrency: int = 3,
+    concurrency: int = 1,
     agent_config: AgentConfig | None = None,
     limits: Limits | None = None,
     headless: bool = True,
@@ -368,8 +371,9 @@ def run_job(
     already = load_completed_attempts(spec.job_id) if resume else {}
     refresh(force=True)
 
-    # task-major: a task's K attempts finish together, so its pass@k settles as early as
-    # possible instead of every task staying provisional until the whole job ends.
+    # task-major: a task's K attempts are queued together, so its pass@k settles as early as
+    # possible instead of every task staying provisional until the whole job ends. Submission
+    # order only -- the pool does not barrier between tasks.
     queue: list[tuple[Task, int]] = [
         (task, index)
         for task in selected

@@ -70,7 +70,7 @@ class Agent(Protocol):
         kill is only a backstop for a genuinely hung process.
 
         Must not raise for ordinary failures -- an exhausted API or a crashed browser is
-        reported via `stop_reason` and `error` so the executor can classify it as ERRORED
+        reported via `stop_reason` and `error` so the executor can classify it as NOT_OBSERVED
         rather than as the agent being wrong.
         """
         ...

@@ -8,10 +8,10 @@ reused verbatim. What's added here is everything a rollout needs and a demo scri
     authenticated page. This is the standard shape (WebArena ships per-site storage_state
     files for exactly this reason): login is a confound and a step tax, not the capability
     under test.
-  * **Video + trace recording** for the transcript viewer.
+  * **Video recording** for the transcript viewer (Playwright tracing is wired through
+    `trace_path` but no caller passes it, so no attempt records a trace).
   * **A domain lock** as an environment invariant.
   * **`prohibited_actions`**, empty by default -- nothing is blocked today.
-  * **Strategy telemetry**: whether the agent reached for the native SQL editor.
 
 On the domain lock: upstream `navigate()` prepends `https://` to any scheme-less URL and
 will happily leave the gym, and the `search` action jumps straight to a search engine. Both
@@ -92,7 +92,7 @@ class GymComputer(PlaywrightComputer):
         self._headless = headless
         self.prohibited_actions = set(prohibited_actions)
 
-        # Telemetry, filled in as the attempt runs.
+        # Filled in as the attempt runs: refusals recorded, video path resolved on exit.
         self.refusals: list[str] = []
         self.video_path: pathlib.Path | None = None
 
@@ -252,13 +252,13 @@ class GymComputer(PlaywrightComputer):
             return
         self._page.goto(url)
 
-    # -- telemetry ----------------------------------------------------------------------
+    # -- readiness checks ---------------------------------------------------------------
 
     def is_authenticated(self) -> bool:
         """True unless we're sitting on Metabase's login page.
 
         Used as a pre-flight check: if injected `storage_state` has expired, that is an
-        infrastructure failure (ERRORED), not the agent failing its task.
+        infrastructure failure (NOT_OBSERVED), not the agent failing its task.
         """
         try:
             self._page.wait_for_load_state()

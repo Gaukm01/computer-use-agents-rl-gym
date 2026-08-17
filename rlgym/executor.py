@@ -223,7 +223,7 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
         finalize()
         return 1
 
-    # Imported here so an import failure is captured as ERRORED rather than crashing
+    # Imported here so an import failure is captured as NOT_OBSERVED rather than crashing
     # before the artifact exists.
     try:
         from .agents.gemini_cu import GeminiComputerUseAgent
