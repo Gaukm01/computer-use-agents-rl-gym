@@ -246,7 +246,6 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
                 # and so a UI can follow along live.
                 artifact.steps.append(step)
                 artifact.step_count = len(artifact.steps)
-                artifact.used_sql_editor = computer.used_sql_editor
                 artifact.refusals = list(computer.refusals)
                 write_artifact(artifact, out_dir)
 
@@ -259,7 +258,6 @@ def run_attempt_worker(spec_path: pathlib.Path) -> int:
                 deadline=deadline,
             )
 
-            artifact.used_sql_editor = computer.used_sql_editor
             artifact.refusals = list(computer.refusals)
 
         # Outside the context: closing it flushed the video, so the path now exists.

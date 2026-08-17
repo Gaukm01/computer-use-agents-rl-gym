@@ -36,13 +36,6 @@ from computers.playwright.playwright import (  # type: ignore[import-not-found]
 # Same viewport main.py uses, so attempts match the harness we verified in Phase 2.
 DEFAULT_SCREEN_SIZE = (1440, 900)
 
-# Selectors that only exist when Metabase's native SQL editor is on screen. Queried for
-# telemetry only -- never shown to the model, which still reads the page off pixels.
-SQL_EDITOR_SELECTORS = (
-    '[data-testid="native-query-editor"], .ace_editor, .cm-editor'
-)
-
-
 class ActionRefused(Exception):
     """Raised when the domain lock or prohibited_actions blocks an action.
 
@@ -100,7 +93,6 @@ class GymComputer(PlaywrightComputer):
         self.prohibited_actions = set(prohibited_actions)
 
         # Telemetry, filled in as the attempt runs.
-        self.used_sql_editor = False
         self.refusals: list[str] = []
         self.video_path: pathlib.Path | None = None
 
@@ -261,26 +253,6 @@ class GymComputer(PlaywrightComputer):
         self._page.goto(url)
 
     # -- telemetry ----------------------------------------------------------------------
-
-    def current_state(self) -> EnvState:
-        state = super().current_state()
-        self._sample_sql_editor_usage()
-        return state
-
-    def _sample_sql_editor_usage(self) -> None:
-        """Note whether the native SQL editor is on screen.
-
-        A DOM query, used purely as harness telemetry -- the result is never fed to the
-        model, and it does not restrict anything. It exists so pass rates can later be
-        split by strategy (SQL editor vs query builder).
-        """
-        if self.used_sql_editor:
-            return
-        try:
-            if self._page.locator(SQL_EDITOR_SELECTORS).count() > 0:
-                self.used_sql_editor = True
-        except Exception:
-            pass
 
     def is_authenticated(self) -> bool:
         """True unless we're sitting on Metabase's login page.

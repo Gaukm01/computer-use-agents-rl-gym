@@ -128,7 +128,6 @@ def main() -> int:
         f"(prompt {artifact.token_usage.prompt_tokens:,}, "
         f"output {artifact.token_usage.output_tokens:,})"
     )
-    print(f"{BOLD}sql editor{RESET}  {artifact.used_sql_editor}")
     if artifact.safety_acknowledgements:
         print(
             f"{BOLD}safety{RESET}      "
