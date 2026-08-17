@@ -183,13 +183,12 @@ class AgentConfig(BaseModel):
 
     # Report the remaining step budget to the agent, and warn it as the cap approaches.
     #
-    # OFF by default, and the platform never turns it on. It exists because we built it
-    # after watching an agent hold the right value on screen at step 12 and then burn its
-    # remaining 28 steps second-guessing itself -- it had no way to know the budget was
-    # running out. Reporting budget is common in agent harnesses, but it is scaffolding we
-    # supply rather than capability the agent has, so it stays a declared option rather
-    # than a silent default.
-    budget_reminders: bool = False
+    # ON by default: an agent asked to finish within a budget it cannot observe is being
+    # measured on a guess, and reporting remaining steps is standard in agent harnesses.
+    # It stays a named field rather than being hardcoded because it materially changes what
+    # a run measures -- results with it on and off are not comparable, so which one produced
+    # a number has to be recorded alongside the number.
+    budget_reminders: bool = True
 
     # Action names to refuse if the model calls them. EMPTY BY DEFAULT -- nothing is
     # blocked. The agent may use the SQL editor or the query builder, its choice. This

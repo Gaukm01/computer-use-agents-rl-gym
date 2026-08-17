@@ -67,6 +67,9 @@ class AgentParams(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     top_k: int | None = Field(default=None, ge=1, le=200)
+    # Whether the agent is told how many steps remain. Changes what the run measures, so it
+    # is a per-job choice recorded in the spec rather than a harness constant.
+    budget_reminders: bool | None = None
 
 
 class SubmitJobRequest(BaseModel):

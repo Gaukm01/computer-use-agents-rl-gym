@@ -58,6 +58,7 @@ export const api = {
       temperature?: number;
       top_p?: number;
       top_k?: number;
+      budget_reminders?: boolean;
     };
   }) =>
     request<JobResult>("/api/jobs", {

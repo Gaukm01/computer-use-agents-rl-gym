@@ -205,12 +205,31 @@ def test_a_valid_call_is_unaffected(monkeypatch, tmp_path) -> None:
 # ----------------------------------------------------------------------------------------
 
 
-def test_step_budget_is_not_reported_by_default(monkeypatch, tmp_path) -> None:
-    """Telling the agent how much budget is left is scaffolding WE supply, so a score
-    earned with it is partly ours. It stays available and off -- see
-    AgentConfig.budget_reminders -- so it can be ablated deliberately rather than being
-    baked silently into every number we report."""
+def test_step_budget_is_reported_by_default(monkeypatch, tmp_path) -> None:
+    """An agent asked to finish inside a budget it cannot observe is being measured on a
+    guess, so remaining steps are reported by default."""
     agent = build_agent()
+    run_with(
+        monkeypatch,
+        tmp_path,
+        [
+            model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2}),
+            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"}),
+        ],
+        agent=agent,
+        max_steps=2,
+    )
+
+    first = payloads_from(agent)[0]
+    assert first["steps_remaining"] == 1
+    # Within the threshold, so the observation also spells out what happens at the cap.
+    assert "reminder" in first
+
+
+def test_step_budget_can_be_turned_off(monkeypatch, tmp_path) -> None:
+    """Turning it off measures whether the agent can manage a budget it cannot see -- a
+    different question, and the reason this is a recorded field rather than a constant."""
+    agent = build_agent(AgentConfig(budget_reminders=False))
     run_with(
         monkeypatch,
         tmp_path,
@@ -227,25 +246,6 @@ def test_step_budget_is_not_reported_by_default(monkeypatch, tmp_path) -> None:
     for payload in observations:
         assert "steps_remaining" not in payload
         assert "reminder" not in payload
-
-
-def test_step_budget_is_reported_when_explicitly_enabled(monkeypatch, tmp_path) -> None:
-    """The knob still works -- it is off, not deleted."""
-    agent = build_agent(AgentConfig(budget_reminders=True))
-    run_with(
-        monkeypatch,
-        tmp_path,
-        [
-            model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2}),
-            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"}),
-        ],
-        agent=agent,
-        max_steps=2,
-    )
-
-    first = payloads_from(agent)[0]
-    assert first["steps_remaining"] == 1
-    assert "reminder" in first
 
 
 def test_submit_instruction_carries_no_task_guidance() -> None:

@@ -180,8 +180,7 @@ function StatsBox({ stats, label }: { stats: RunStats; label: string }) {
       )}
       {open && (
         <div className="hint" style={{ padding: "0 12px 10px" }}>
-          Averages cover rollouts the agent actually ran. One that died in provisioning
-          contributes no steps and a few seconds, and would drag both figures toward zero.
+          Averages cover rollouts the agent actually ran.
         </div>
       )}
     </div>
@@ -407,9 +406,9 @@ export function JobView({ jobId, onBack }: { jobId: string; onBack: () => void }
             <span className="muted mono">
               {job.spec.limits.max_steps} steps / {job.spec.limits.timeout_s}s per rollout
             </span>
-            {agent.budget_reminders && (
-              <span className="pill pill-warn">budget reminders on</span>
-            )}
+            <span className="muted mono">
+              step-budget awareness {agent.budget_reminders ? "on" : "off"}
+            </span>
             {agent.hint && <span className="pill pill-warn">hint given</span>}
           </div>
 

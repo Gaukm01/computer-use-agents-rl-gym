@@ -75,6 +75,7 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
   const [temperature, setTemperature] = useState("");
   const [topP, setTopP] = useState("");
   const [topK, setTopK] = useState("");
+  const [budgetReminders, setBudgetReminders] = useState(true);
   const [showAgentControls, setShowAgentControls] = useState(false);
 
   const [recordVideo, setRecordVideo] = useState(true);
@@ -105,6 +106,7 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
         setTemperature(String(d.default.temperature));
         setTopP(String(d.default.top_p));
         setTopK(String(d.default.top_k));
+        setBudgetReminders(d.default.budget_reminders);
       })
       .catch(() => undefined);
   }, []);
@@ -175,6 +177,7 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
           ),
           top_p: parseNumber(topP, defaults?.default.top_p ?? 0.95),
           top_k: parsePositive(topK, defaults?.default.top_k ?? 40),
+          budget_reminders: budgetReminders,
         },
       });
       onOpenJob(job.spec.job_id);
@@ -260,14 +263,10 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
               <label>
                 Attempts per task
                 <Info>
-                  Each attempt is an independent rollout in its own fresh gym, capped at{" "}
-                  <b>{capSeconds}s</b> of agent time — the cap is per attempt and does not
-                  scale, so more attempts cost more wall clock, not longer attempts.
+                  Independent rollouts, each in a fresh gym, capped at {capSeconds}s.
                   <br />
-                  <br />
-                  {totalAttempts} attempt(s) at {lanes} in parallel: at most{" "}
-                  <b>~{worstCaseMinutes} min</b>, typically far less, since most attempts
-                  finish well inside the cap.
+                  {totalAttempts} at {lanes} in parallel: at most{" "}
+                  <b>~{worstCaseMinutes} min</b>.
                 </Info>
               </label>
               <NumberField value={attempts} onChange={setAttempts} />
@@ -277,8 +276,8 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
               <label>
                 Concurrency
                 <Info>
-                  Attempts running at once, each with its own Postgres + Metabase. Bounded
-                  by memory at {defaults?.max_gyms ?? 3}.
+                  Rollouts at once, each with its own gym. Memory-bound, max{" "}
+                  {defaults?.max_gyms ?? 3}.
                 </Info>
               </label>
               <NumberField value={concurrency} onChange={setConcurrency} />
@@ -296,13 +295,22 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
             </select>
           </div>
 
-          <button
-            className="btn btn-sm"
-            style={{ marginBottom: 14 }}
-            onClick={() => setShowAgentControls((s) => !s)}
-          >
-            {showAgentControls ? "▾" : "▸"} More agent controls
-          </button>
+          <div className="control-row">
+            <button
+              className="btn btn-sm"
+              onClick={() => setShowAgentControls((s) => !s)}
+            >
+              {showAgentControls ? "▾" : "▸"} More agent controls
+            </button>
+            <label className="inline-check">
+              <input
+                type="checkbox"
+                checked={recordVideo}
+                onChange={(e) => setRecordVideo(e.target.checked)}
+              />
+              Record video
+            </label>
+          </div>
 
           {showAgentControls && (
             <div className="sub-panel">
@@ -327,18 +335,19 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
                   onChange={setMaxSteps}
                   placeholder={String(defaults?.max_steps ?? 40)}
                 />
-                <div className="hint">Set to 1–2 for a cheap plumbing check.</div>
               </div>
-              <label
-                style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}
-              >
+              <label className="inline-check">
                 <input
                   type="checkbox"
-                  checked={recordVideo}
-                  onChange={(e) => setRecordVideo(e.target.checked)}
-                  style={{ width: "auto" }}
+                  checked={budgetReminders}
+                  onChange={(e) => setBudgetReminders(e.target.checked)}
                 />
-                Record video
+                Step-budget awareness
+                <Info>
+                  Tells the agent how many steps remain, and warns it as the cap nears.
+                  <br />
+                  Off measures whether it can manage a budget it cannot see.
+                </Info>
               </label>
             </div>
           )}

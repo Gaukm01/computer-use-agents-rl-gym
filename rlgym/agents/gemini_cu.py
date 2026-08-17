@@ -86,15 +86,13 @@ MAX_CONSECUTIVE_MALFORMED = 3
 MALFORMED_ACTION_ERRORS = (KeyError, TypeError, ValueError, IndexError, AttributeError)
 
 # When this few steps remain, every observation carries an explicit instruction to submit.
-# Only ever consulted when AgentConfig.budget_reminders is on, which it is not by default.
+# Consulted only when AgentConfig.budget_reminders is on, which it is by default.
 #
-# Motivated by an observed failure rather than invented: on problem10 the agent had the
-# correct value on screen at step 12, then spent the remaining 28 steps re-running queries
-# trying to decide whether Metabase's displayed 3.15 was rounded or exact -- and hit the step
-# cap without ever submitting. It had no way to know its budget was running out. Reporting
-# remaining budget is common in agent harnesses, but it is help we would be supplying, and a
-# score earned with it is a score for the harness. Kept, off, and declared -- so it can be
-# ablated deliberately rather than baked into every number we report.
+# Motivated by an observed failure rather than invented: an agent had the correct value on
+# screen at step 12, then spent its remaining 28 steps re-running queries trying to decide
+# whether a displayed 3.15 was rounded or exact -- and hit the cap without ever submitting.
+# It had no way to know the budget was running out. Turning the flag off measures whether an
+# agent can manage a budget it cannot see, which is a different question and a valid one.
 SUBMIT_REMINDER_THRESHOLD = 8
 
 
