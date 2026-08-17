@@ -41,27 +41,53 @@ export interface AttemptSummary {
   step_count: number;
   duration_s: number | null;
   total_tokens: number;
-  used_sql_editor: boolean;
   error: string | null;
   diff: string | null;
   has_video: boolean;
   screenshot_count: number;
 }
 
+/** Cost of a set of attempts. Averages cover *observed* attempts only -- one that died
+ *  in provisioning contributes 0 steps and would drag them toward zero. */
+export interface RunStats {
+  observed_attempts: number;
+  total_tokens: number;
+  total_duration_s: number;
+  avg_duration_s: number | null;
+  avg_steps: number | null;
+  total_steps: number;
+}
+
 export interface TaskResult {
   task_id: string;
   prompt: string | null;
   expected_output: unknown;
+  /** One row per REQUESTED attempt, including ones that have not started -- those carry
+   *  an empty attempt_id, which is what makes them unopenable. */
   attempts: AttemptSummary[];
   total_attempts: number;
+  completed: number;
+  running: number;
+  queued: number;
   valid_attempts: number;
   passed: number;
   failed: number;
   errored: number;
   pass_at_k: boolean;
   pass_rate: number | null;
-  /** Errors left fewer valid attempts than requested, so pass@k rests on fewer samples. */
-  low_confidence: boolean;
+  stats: RunStats;
+}
+
+export interface AgentConfig {
+  agent_type: string;
+  model: string;
+  hint: string | null;
+  temperature: number;
+  top_p: number;
+  top_k: number;
+  /** Reporting remaining budget to the agent. Off, and the platform never sets it. */
+  budget_reminders: boolean;
+  prohibited_actions: string[];
 }
 
 export interface JobSpec {
@@ -71,7 +97,7 @@ export interface JobSpec {
   attempts_per_task: number;
   concurrency: number;
   created_at: string | null;
-  agent_config: { model: string; hint: string | null };
+  agent_config: AgentConfig;
   limits: { max_steps: number; timeout_s: number };
 }
 
@@ -84,12 +110,15 @@ export interface JobResult {
   tasks: TaskResult[];
   total_attempts: number;
   completed_attempts: number;
+  running_attempts: number;
+  queued_attempts: number;
   valid_attempts: number;
   passed: number;
   failed: number;
   errored: number;
   pass_at_k_rate: number | null;
   mean_reward: number | null;
+  stats: RunStats;
   total_tokens: number;
   error: string | null;
 }
@@ -126,7 +155,6 @@ export interface AttemptArtifact {
   final_text: string | null;
   error: string | null;
   video_path: string | null;
-  used_sql_editor: boolean;
   refusals: string[];
   safety_acknowledgements: number;
   token_usage: { prompt_tokens: number; output_tokens: number; total_tokens: number };
@@ -163,4 +191,13 @@ export interface Health {
   max_gyms: number;
   /** Human-readable summary of whatever is missing. */
   detail: string | null;
+}
+
+/** Agent controls the UI offers, served so the form and the harness cannot drift. */
+export interface AgentDefaults {
+  models: string[];
+  default: AgentConfig;
+  max_gyms: number;
+  timeout_s: number;
+  max_steps: number;
 }

@@ -35,35 +35,15 @@ export function App() {
           Metabase Computer-Use RL Gym <span>· eval console</span>
         </div>
         <div className="spacer" />
-        {/* There is no long-lived gym to report on -- each attempt provisions its own.
-            These are the things whose absence would make every attempt fail, shown up
-            front so nobody debugs a failed job when the real problem is setup. */}
-        {health && (
-          <>
-            <span
-              className={`pill ${health.docker_available ? "pill-pass" : "pill-fail"}`}
-            >
-              docker {health.docker_available ? "ok" : "down"}
-            </span>
-            <span
-              className={`pill ${health.images_present ? "pill-pass" : "pill-fail"}`}
-              title="Images must be pulled ahead of time — a cold pull inside an attempt reads as a hang"
-            >
-              images {health.images_present ? "ready" : "missing"}
-            </span>
-            <span
-              className={`pill ${health.credentials_configured ? "pill-pass" : "pill-fail"}`}
-            >
-              creds {health.credentials_configured ? "set" : "missing"}
-            </span>
-            <span className="pill pill-muted" title="Concurrent gyms, bounded by memory">
-              max {health.max_gyms} gyms
-            </span>
-          </>
-        )}
+        <button className="btn btn-primary btn-sm" onClick={() => navigate(null)}>
+          New job
+        </button>
       </header>
 
       <main className="container">
+        {/* Only ever rendered when something is genuinely broken. Setup problems make
+            every attempt fail identically, so saying so here costs one line and saves
+            debugging a job whose real problem was the environment. */}
         {health?.detail && (
           <div className="error-box">
             <b>Attempts will fail until this is fixed.</b>

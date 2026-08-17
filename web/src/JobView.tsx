@@ -1,63 +1,206 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import { Transcript } from "./Transcript";
-import type { AttemptSummary, JobResult, TaskResult } from "./types";
+import type {
+  AttemptPhase,
+  AttemptSummary,
+  JobResult,
+  RunStats,
+  TaskResult,
+} from "./types";
 
-const POLL_MS = 3000;
+const POLL_MS = 2000;
 
-function attemptChipClass(attempt: AttemptSummary): string {
+/** Setup work an attempt goes through before the agent does anything. Provisioning alone
+ *  takes ~35s, so without this a new attempt just looks hung. */
+const PHASE_STEPS: { phase: AttemptPhase; label: string }[] = [
+  { phase: "PROVISIONING", label: "Booting gym — Postgres + Metabase" },
+  { phase: "AUTHENTICATING", label: "Minting a session" },
+  { phase: "CONNECTING", label: "Attaching the browser" },
+  { phase: "RUNNING", label: "Agent working" },
+  { phase: "GRADING", label: "Grading" },
+];
+
+const PHASE_ORDER: AttemptPhase[] = [
+  "QUEUED",
+  "PROVISIONING",
+  "AUTHENTICATING",
+  "CONNECTING",
+  "RUNNING",
+  "GRADING",
+  "DONE",
+];
+
+const TERMINAL_STATUSES = new Set([
+  "COMPLETED_CORRECT",
+  "ANSWERED",
+  "MAX_STEPS_EXCEEDED",
+  "TIMED_OUT",
+  "NOT_OBSERVED",
+]);
+
+const isTerminal = (a: AttemptSummary) => TERMINAL_STATUSES.has(a.status);
+const hasStarted = (a: AttemptSummary) => a.attempt_id !== "";
+
+function seconds(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  if (value < 90) return `${value.toFixed(0)}s`;
+  return `${Math.floor(value / 60)}m ${(value % 60).toFixed(0)}s`;
+}
+
+function chipClass(attempt: AttemptSummary): string {
+  if (!hasStarted(attempt)) return "chip chip-idle";
   if (attempt.status === "COMPLETED_CORRECT") return "chip chip-pass";
   if (attempt.status === "NOT_OBSERVED") return "chip chip-warn";
-  if (attempt.status === "IN_PROGRESS" || attempt.status === "QUEUED")
-    return "chip chip-running";
+  if (!isTerminal(attempt)) return "chip chip-running";
   return "chip chip-fail";
 }
 
-/** Phase is what makes the ~2 minutes of provisioning legible instead of looking hung. */
-function phaseLabel(attempt: AttemptSummary): string | null {
-  if (attempt.status === "IN_PROGRESS" || attempt.status === "QUEUED") {
-    return attempt.phase.toLowerCase();
-  }
-  if (attempt.status === "NOT_OBSERVED" && attempt.phase !== "DONE") {
-    return `failed in ${attempt.phase.toLowerCase()}`;
-  }
-  return null;
-}
-
-function attemptChipLabel(attempt: AttemptSummary): string {
+function chipLabel(attempt: AttemptSummary, jobEnded: boolean): string {
+  if (!hasStarted(attempt)) return jobEnded ? "Not run" : "Queued";
   switch (attempt.status) {
     case "COMPLETED_CORRECT":
       return "Passed";
     case "NOT_OBSERVED":
-      // Deliberately not "Failed": reward is null and it's out of the pass@k denominator.
+      // Deliberately not "Failed": its outcome was never seen, so it is not a loss.
       return "Not observed";
     case "MAX_STEPS_EXCEEDED":
-      return "Max steps";
+      return "Out of steps";
     case "TIMED_OUT":
       return "Timed out";
-    case "IN_PROGRESS":
-      return "Running";
-    case "QUEUED":
-      return "Queued";
-    default:
+    case "ANSWERED":
       return "Failed";
+    default:
+      return "Running";
   }
+}
+
+/** Reward, exactly as the RL signal defines it: 1, 0, or null for an unobserved outcome. */
+function rewardText(attempt: AttemptSummary): string | null {
+  if (!isTerminal(attempt)) return null;
+  return attempt.reward === null ? "reward null" : `reward ${attempt.reward}`;
+}
+
+function PhaseChecklist({ attempt }: { attempt: AttemptSummary }) {
+  const current = PHASE_ORDER.indexOf(attempt.phase);
+  return (
+    <div className="phase-list">
+      <div className="phase-head">
+        attempt {attempt.attempt_index + 1} — in progress
+      </div>
+      {PHASE_STEPS.map(({ phase, label }) => {
+        const at = PHASE_ORDER.indexOf(phase);
+        const state = at < current ? "done" : at === current ? "now" : "todo";
+        return (
+          <div className={`phase-step phase-${state}`} key={phase}>
+            <span className="phase-mark">
+              {state === "done" ? "✓" : state === "now" ? "●" : "○"}
+            </span>
+            <span>{label}</span>
+            {phase === "RUNNING" && state !== "todo" && attempt.step_count > 0 && (
+              <span className="muted"> · step {attempt.step_count}</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** passed / failed / not observed / running / queued, in one bar. */
+function ProgressBar({
+  passed,
+  failed,
+  errored,
+  running,
+  queued,
+}: {
+  passed: number;
+  failed: number;
+  errored: number;
+  running: number;
+  queued: number;
+}) {
+  const total = passed + failed + errored + running + queued || 1;
+  const segments = [
+    { key: "passed", n: passed, cls: "seg-pass" },
+    { key: "failed", n: failed, cls: "seg-fail" },
+    { key: "errored", n: errored, cls: "seg-warn" },
+    { key: "running", n: running, cls: "seg-run" },
+    { key: "queued", n: queued, cls: "seg-idle" },
+  ];
+  return (
+    <div className="progress-bar">
+      {segments
+        .filter((s) => s.n > 0)
+        .map((s) => (
+          <div
+            key={s.key}
+            className={`progress-seg ${s.cls}`}
+            style={{ width: `${(s.n / total) * 100}%` }}
+            title={`${s.n} ${s.key}`}
+          />
+        ))}
+    </div>
+  );
+}
+
+function StatsBox({ stats, label }: { stats: RunStats; label: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="stats-box">
+      <button className="stats-toggle" onClick={() => setOpen((o) => !o)}>
+        <span className="mono muted">{open ? "▾" : "▸"}</span> {label}
+      </button>
+      {open && (
+        <div className="stats-grid">
+          <div>
+            <div className="stat-label">tokens used</div>
+            <div className="stat-value">{stats.total_tokens.toLocaleString()}</div>
+          </div>
+          <div>
+            <div className="stat-label">total agent time</div>
+            <div className="stat-value">{seconds(stats.total_duration_s)}</div>
+          </div>
+          <div>
+            <div className="stat-label">avg time / rollout</div>
+            <div className="stat-value">{seconds(stats.avg_duration_s)}</div>
+          </div>
+          <div>
+            <div className="stat-label">avg steps / rollout</div>
+            <div className="stat-value">
+              {stats.avg_steps === null ? "—" : stats.avg_steps.toFixed(1)}
+            </div>
+          </div>
+          <div>
+            <div className="stat-label">rollouts measured</div>
+            <div className="stat-value">{stats.observed_attempts}</div>
+          </div>
+        </div>
+      )}
+      {open && (
+        <div className="hint" style={{ padding: "0 12px 10px" }}>
+          Averages cover rollouts the agent actually ran. One that died in provisioning
+          contributes no steps and a few seconds, and would drag both figures toward zero.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function TaskCard({
   task,
   jobId,
-  requestedAttempts,
+  jobEnded,
 }: {
   task: TaskResult;
   jobId: string;
-  requestedAttempts: number;
+  jobEnded: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
 
-  const rate =
-    task.pass_rate === null ? "—" : `${Math.round(task.pass_rate * 100)}% pass rate`;
+  const running = task.attempts.filter((a) => hasStarted(a) && !isTerminal(a));
 
   return (
     <div className="task-card">
@@ -65,60 +208,71 @@ function TaskCard({
         <span className="muted mono">{open ? "▾" : "▸"}</span>
         <span className="task-id">{task.task_id}</span>
         <span className="task-prompt">{task.prompt}</span>
-        {task.low_confidence && (
-          <span
-            className="pill pill-warn"
-            title={`only ${task.valid_attempts} of ${requestedAttempts} attempts produced an observable outcome`}
-          >
-            low confidence
+        {/* Visible without expanding: how expensive this task is per rollout is often
+            the reason to look at it at all. */}
+        {task.stats.avg_duration_s !== null && (
+          <span className="muted mono" title="average per rollout the agent actually ran">
+            {seconds(task.stats.avg_duration_s)} · {task.stats.avg_steps?.toFixed(0)}{" "}
+            steps
           </span>
         )}
-        <span className={`pill ${task.pass_at_k ? "pill-pass" : "pill-fail"}`}>
-          {task.pass_at_k ? "pass@k" : "no pass"}
+        <span className="muted mono">
+          {task.completed}/{task.total_attempts}
         </span>
-        <span className="muted mono">{rate}</span>
+        {task.passed > 0 && <span className="pill pill-pass">{task.passed} ✓</span>}
+        {task.failed > 0 && <span className="pill pill-fail">{task.failed} ✗</span>}
+        {task.errored > 0 && (
+          <span className="pill pill-warn">{task.errored} not observed</span>
+        )}
       </div>
 
       {open && (
         <div className="task-card-body">
           <div className="prompt-box">{task.prompt}</div>
 
-          <div style={{ marginBottom: 10 }}>
+          <div style={{ marginBottom: 12 }}>
             <span className="muted" style={{ fontSize: 12 }}>
               Expected answer:{" "}
             </span>
             <span className="mono">{JSON.stringify(task.expected_output)}</span>
           </div>
 
-          <div className="chip-row" style={{ marginBottom: 4 }}>
-            {task.attempts.map((attempt) => (
-              <button
-                key={attempt.attempt_id}
-                className={`${attemptChipClass(attempt)}${
-                  selected === attempt.attempt_id ? " selected" : ""
-                }`}
-                onClick={() =>
-                  setSelected((current) =>
-                    current === attempt.attempt_id ? null : attempt.attempt_id,
-                  )
-                }
-              >
-                <span>{attempt.attempt_index + 1}</span>
-                <span>
-                  {attempt.status === "COMPLETED_CORRECT" ? "✓" : "✗"}{" "}
-                  {attemptChipLabel(attempt)}
-                </span>
-                {phaseLabel(attempt) && (
-                  <span style={{ opacity: 0.7 }}>· {phaseLabel(attempt)}</span>
-                )}
-              </button>
-            ))}
-            {task.attempts.length === 0 && (
-              <span className="muted" style={{ fontSize: 12 }}>
-                no attempts finished yet
-              </span>
-            )}
+          <div className="chip-row" style={{ marginBottom: 10 }}>
+            {task.attempts.map((attempt) => {
+              const openable = hasStarted(attempt) && isTerminal(attempt);
+              return (
+                <button
+                  key={`${task.task_id}-${attempt.attempt_index}`}
+                  className={`${chipClass(attempt)}${
+                    selected === attempt.attempt_id ? " selected" : ""
+                  }`}
+                  disabled={!openable}
+                  title={
+                    openable
+                      ? "Open the transcript"
+                      : "The transcript opens once this rollout finishes"
+                  }
+                  onClick={() =>
+                    setSelected((current) =>
+                      current === attempt.attempt_id ? null : attempt.attempt_id,
+                    )
+                  }
+                >
+                  <span>{attempt.attempt_index + 1}</span>
+                  <span>{chipLabel(attempt, jobEnded)}</span>
+                  {rewardText(attempt) && (
+                    <span className="chip-reward">{rewardText(attempt)}</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
+
+          {running.map((attempt) => (
+            <PhaseChecklist key={attempt.attempt_id} attempt={attempt} />
+          ))}
+
+          <StatsBox stats={task.stats} label="Rollout statistics for this task" />
 
           {selected && (
             <div style={{ marginTop: 16 }}>
@@ -162,15 +316,19 @@ export function JobView({ jobId, onBack }: { jobId: string; onBack: () => void }
   if (error) return <div className="error-box">{error}</div>;
   if (!job) return <div className="empty">loading job…</div>;
 
-  const running = job.status === "RUNNING" || job.status === "QUEUED";
+  const live = job.status === "RUNNING" || job.status === "QUEUED";
+  const jobEnded = !live;
   const statusPill =
     job.status === "COMPLETED"
       ? "pill-pass"
-      : running
+      : live
         ? "pill-info"
         : job.status === "FAILED"
           ? "pill-fail"
           : "pill-muted";
+
+  const agent = job.spec.agent_config;
+  const scored = job.passed + job.failed;
 
   return (
     <div>
@@ -180,7 +338,7 @@ export function JobView({ jobId, onBack }: { jobId: string; onBack: () => void }
         </button>
         <span className="job-id">{job.spec.job_id}</span>
         <span className={`pill ${statusPill}`}>{job.status}</span>
-        {running && (
+        {live && (
           <button
             className="btn btn-sm"
             onClick={() => api.cancelJob(jobId).catch(() => undefined)}
@@ -192,74 +350,92 @@ export function JobView({ jobId, onBack }: { jobId: string; onBack: () => void }
 
       <div className="panel" style={{ marginBottom: 20 }}>
         <div className="panel-body">
-          <div className="stat-row">
-            <div>
-              <div className="stat-label">progress</div>
-              <div className="stat-value">
-                {job.completed_attempts}/{job.total_attempts}
-              </div>
+          {/* The headline is withheld until the job is over. A rate computed off three
+              finished rollouts out of thirty is not the run's result, and showing it as
+              one invites reading a number that is about to change. */}
+          {jobEnded && scored > 0 && (
+            <div className="headline">
+              <span className="headline-value">
+                {Math.round((job.passed / scored) * 100)}%
+              </span>
+              <span className="headline-label">
+                passed — {job.passed} of {scored} scored rollout(s)
+                {job.errored > 0 && `, ${job.errored} not observed`}
+              </span>
             </div>
-            <div>
-              <div className="stat-label">pass@{job.spec.attempts_per_task}</div>
-              <div className="stat-value">
-                {job.pass_at_k_rate === null
-                  ? "—"
-                  : `${Math.round(job.pass_at_k_rate * 100)}%`}
-              </div>
-            </div>
-            <div>
-              <div className="stat-label">passed</div>
-              <div className="stat-value" style={{ color: "var(--pass-fg)" }}>
-                {job.passed}
-              </div>
-            </div>
-            <div>
-              <div className="stat-label">failed</div>
-              <div className="stat-value" style={{ color: "var(--fail-fg)" }}>
-                {job.failed}
-              </div>
-            </div>
-            <div>
-              <div className="stat-label">errored</div>
-              <div className="stat-value" style={{ color: "var(--warn-fg)" }}>
-                {job.errored}
-              </div>
-            </div>
-            <div>
-              <div className="stat-label">tokens</div>
-              <div className="stat-value">{job.total_tokens.toLocaleString()}</div>
-            </div>
-            {job.duration_s !== null && (
-              <div>
-                <div className="stat-label">duration</div>
-                <div className="stat-value">{job.duration_s.toFixed(0)}s</div>
-              </div>
+          )}
+
+          <ProgressBar
+            passed={job.passed}
+            failed={job.failed}
+            errored={job.errored}
+            running={job.running_attempts}
+            queued={job.queued_attempts}
+          />
+
+          <div className="counts">
+            <span className="count count-done">
+              <b>{job.completed_attempts}</b> processed
+            </span>
+            <span className="count count-run">
+              <b>{job.running_attempts}</b> running
+            </span>
+            <span className="count count-idle">
+              <b>{job.queued_attempts}</b> in queue
+            </span>
+            <span className="spacer" />
+            <span className="count count-pass">
+              <b>{job.passed}</b> passed
+            </span>
+            <span className="count count-fail">
+              <b>{job.failed}</b> failed
+            </span>
+            {job.errored > 0 && (
+              <span className="count count-warn">
+                <b>{job.errored}</b> not observed
+              </span>
             )}
           </div>
 
-          {job.errored > 0 && (
-            <div style={{ marginTop: 14, fontSize: 12 }} className="muted">
-              {job.errored} attempt(s) not observed — excluded from pass@k rather than
-              counted as failures, since their outcome was never seen.
-            </div>
-          )}
-          <div style={{ marginTop: 10, fontSize: 12 }} className="muted">
-            {job.spec.task_ids.length} task(s) × {job.spec.attempts_per_task} attempt(s) ·
-            concurrency {job.spec.concurrency} (own gym each) · {job.spec.agent_config.model} ·{" "}
-            {job.spec.limits.max_steps} steps / {job.spec.limits.timeout_s}s budget
-            {job.spec.tasks_file ? ` · ${job.spec.tasks_file.split("/").pop()}` : ""}
+          {/* Which policy produced these numbers. Locked to the run: it is read from the
+              job's own spec, so it reports what actually ran, not the form's current state. */}
+          <div className="agent-line">
+            <span className="mono">{agent.model}</span>
+            <span className="muted mono">
+              temp {agent.temperature} · top_p {agent.top_p} · top_k {agent.top_k}
+            </span>
+            <span className="muted mono">
+              {job.spec.limits.max_steps} steps / {job.spec.limits.timeout_s}s per rollout
+            </span>
+            {agent.budget_reminders && (
+              <span className="pill pill-warn">budget reminders on</span>
+            )}
+            {agent.hint && <span className="pill pill-warn">hint given</span>}
+          </div>
+
+          <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+            {job.spec.task_ids.length} task(s) × {job.spec.attempts_per_task} rollout(s) ·
+            concurrency {job.spec.concurrency} (own gym each)
+            {job.duration_s !== null && ` · ran ${seconds(job.duration_s)}`}
+            {job.spec.tasks_file
+              ? ` · ${job.spec.tasks_file.split("/").pop()}`
+              : ""}
           </div>
         </div>
       </div>
 
-      {job.tasks.map((task) => (
-        <TaskCard
-          key={task.task_id}
-          task={task}
-          jobId={jobId}
-          requestedAttempts={job.spec.attempts_per_task}
-        />
-      ))}
+      <StatsBox stats={job.stats} label="Run statistics" />
+
+      <div style={{ marginTop: 16 }}>
+        {job.tasks.map((task) => (
+          <TaskCard
+            key={task.task_id}
+            task={task}
+            jobId={jobId}
+            jobEnded={jobEnded}
+          />
+        ))}
+      </div>
     </div>
   );
 }

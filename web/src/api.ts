@@ -1,4 +1,5 @@
 import type {
+  AgentDefaults,
   AttemptDetail,
   Health,
   JobResult,
@@ -28,6 +29,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<Health>("/api/health"),
 
+  agentDefaults: () => request<AgentDefaults>("/api/agent-defaults"),
+
   listTasks: (tasksFile?: string | null) =>
     request<Task[]>(
       "/api/tasks" + (tasksFile ? `?tasks_file=${encodeURIComponent(tasksFile)}` : ""),
@@ -50,6 +53,12 @@ export const api = {
     max_steps?: number | null;
     timeout_s?: number | null;
     record_video?: boolean;
+    agent?: {
+      model?: string;
+      temperature?: number;
+      top_p?: number;
+      top_k?: number;
+    };
   }) =>
     request<JobResult>("/api/jobs", {
       method: "POST",

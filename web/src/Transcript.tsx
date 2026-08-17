@@ -120,7 +120,7 @@ export function Transcript({
     evaluation?.verdict === "pass"
       ? "Test passed: answer matches the expected answer."
       : evaluation?.verdict === "not_graded"
-        ? "Not graded: the outcome was never observed, so this attempt is excluded from pass@k."
+        ? "Not graded: the outcome was never observed, so this rollout carries no reward."
         : (evaluation?.diff ?? "Test failed.");
 
   return (
@@ -140,7 +140,7 @@ export function Transcript({
             <span className="grade-key">Reward:</span>
             <span className="grade-val">
               {artifact.status === "NOT_OBSERVED"
-                ? "null — excluded from pass@k, not counted as a failure"
+                ? "null — the outcome was never observed, so this is not a failure"
                 : String(evaluation?.reward ?? "—")}
             </span>
           </div>
@@ -151,11 +151,12 @@ export function Transcript({
           <div className="grade-row">
             <span className="grade-key">Actual:</span>
             <span className="grade-val">
+              {/* An answer that isn't JSON is kept as the string it is rather than
+                  nulled out, so there is no longer an "unparseable" case to report --
+                  only "no answer at all". */}
               {artifact.actual_output !== null && artifact.actual_output !== undefined
                 ? JSON.stringify(artifact.actual_output)
-                : artifact.actual_output_raw
-                  ? `unparseable: ${artifact.actual_output_raw.slice(0, 200)}`
-                  : "— (no answer submitted)"}
+                : "— (no answer submitted)"}
             </span>
           </div>
           {evaluation?.near_miss && (
@@ -203,7 +204,6 @@ export function Transcript({
         <span className="muted mono">
           {artifact.stop_reason} · {artifact.token_usage.total_tokens.toLocaleString()} tokens
           {artifact.duration_s ? ` · ${artifact.duration_s.toFixed(0)}s` : ""}
-          {artifact.used_sql_editor ? " · used SQL editor" : " · query builder"}
         </span>
       </div>
 

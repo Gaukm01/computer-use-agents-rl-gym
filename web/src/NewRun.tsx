@@ -1,6 +1,61 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { JobResult, Task } from "./types";
+import type { AgentDefaults, JobResult, Task } from "./types";
+
+/** A number field you can actually type in.
+ *
+ *  The obvious `value={n} onChange={setN(Math.max(1, Number(v)))}` is unusable: clearing
+ *  the box yields "", `Number("")` is 0, the clamp snaps it back to 1, and the field can
+ *  never be edited — only stepped. So the raw text is what's held in state, and it is
+ *  coerced once, at submit.
+ */
+function NumberField({
+  value,
+  onChange,
+  ...rest
+}: {
+  value: string;
+  onChange: (next: string) => void;
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, "value" | "onChange">) {
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      {...rest}
+    />
+  );
+}
+
+/** Click-to-open explainer. A `title` tooltip is too easy to miss for something that
+ *  determines how long a run takes and how much it costs. */
+function Info({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="info-wrap">
+      <button
+        type="button"
+        className="info-dot"
+        aria-label="more information"
+        onClick={() => setOpen((o) => !o)}
+      >
+        i
+      </button>
+      {open && <span className="info-pop">{children}</span>}
+    </span>
+  );
+}
+
+function parsePositive(text: string, fallback: number): number {
+  const value = Number(text.trim());
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
+function parseNumber(text: string, fallback: number): number {
+  const value = Number(text.trim());
+  return Number.isFinite(value) ? value : fallback;
+}
 
 /** Left: configure and launch a run. Right: previous runs. */
 export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
@@ -9,11 +64,20 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
   const [sourceName, setSourceName] = useState("resources/tasks.json (bundled)");
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  const [attempts, setAttempts] = useState(1);
-  const [concurrency, setConcurrency] = useState(3);
-  const [maxSteps, setMaxSteps] = useState<number | "">("");
-  const [recordVideo, setRecordVideo] = useState(true);
+  const [attempts, setAttempts] = useState("1");
+  const [concurrency, setConcurrency] = useState("1");
+  const [maxSteps, setMaxSteps] = useState("");
 
+  // Agent controls. Defaults come from the server so the form can't drift from the
+  // harness — whatever the harness treats as default is what's shown here.
+  const [defaults, setDefaults] = useState<AgentDefaults | null>(null);
+  const [model, setModel] = useState("");
+  const [temperature, setTemperature] = useState("");
+  const [topP, setTopP] = useState("");
+  const [topK, setTopK] = useState("");
+  const [showAgentControls, setShowAgentControls] = useState(false);
+
+  const [recordVideo, setRecordVideo] = useState(true);
   const [jobs, setJobs] = useState<JobResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -33,6 +97,16 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
   useEffect(() => loadTasks(null), []);
   useEffect(() => {
     api.listJobs().then(setJobs).catch(() => undefined);
+    api
+      .agentDefaults()
+      .then((d) => {
+        setDefaults(d);
+        setModel(d.default.model);
+        setTemperature(String(d.default.temperature));
+        setTopP(String(d.default.top_p));
+        setTopK(String(d.default.top_k));
+      })
+      .catch(() => undefined);
   }, []);
 
   async function onUpload(event: React.ChangeEvent<HTMLInputElement>) {
@@ -69,17 +143,39 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
     });
   }
 
+  const k = parsePositive(attempts, 1);
+  const lanes = Math.min(
+    parsePositive(concurrency, 1),
+    defaults?.max_gyms ?? 3,
+  );
+  const totalAttempts = selected.size * k;
+  const capSeconds = defaults?.timeout_s ?? 600;
+  // Each attempt boots its own Postgres + Metabase before the agent starts; measured at
+  // ~35s. The cap applies to agent time only, so the worst case per attempt is cap + boot.
+  const worstCaseMinutes = Math.ceil(
+    (Math.ceil(totalAttempts / Math.max(lanes, 1)) * (capSeconds + 35)) / 60,
+  );
+
   async function run() {
     setBusy(true);
     setError(null);
     try {
       const job = await api.submitJob({
         task_ids: Array.from(selected),
-        attempts_per_task: attempts,
-        concurrency,
+        attempts_per_task: k,
+        concurrency: lanes,
         tasks_file: tasksFile,
-        max_steps: maxSteps === "" ? null : Number(maxSteps),
+        max_steps: maxSteps.trim() === "" ? null : parsePositive(maxSteps, 40),
         record_video: recordVideo,
+        agent: {
+          model: model || undefined,
+          temperature: parseNumber(
+            temperature,
+            defaults?.default.temperature ?? 1,
+          ),
+          top_p: parseNumber(topP, defaults?.default.top_p ?? 0.95),
+          top_k: parsePositive(topK, defaults?.default.top_k ?? 40),
+        },
       });
       onOpenJob(job.spec.job_id);
     } catch (e) {
@@ -88,8 +184,6 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
       setBusy(false);
     }
   }
-
-  const totalAttempts = selected.size * attempts;
 
   return (
     <div className="grid-2">
@@ -122,8 +216,9 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
             )}
             <div className="hint">
               Each task needs <span className="mono">id</span>,{" "}
-              <span className="mono">task</span> and <span className="mono">answer</span>{" "}
-              (a JSON string). Validated on upload.
+              <span className="mono">task</span> and{" "}
+              <span className="mono">answer</span>. The answer may be JSON or a plain
+              value.
             </div>
           </div>
 
@@ -160,58 +255,93 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
             </div>
           </div>
 
-          <div className="field">
-            <label>Attempts per task (K)</label>
-            <input
-              type="number"
-              min={1}
-              max={20}
-              value={attempts}
-              onChange={(e) => setAttempts(Math.max(1, Number(e.target.value)))}
-            />
-            <div className="hint">pass@K is computed over attempts that produced an observable outcome.</div>
+          <div className="field-row">
+            <div className="field">
+              <label>
+                Attempts per task
+                <Info>
+                  Each attempt is an independent rollout in its own fresh gym, capped at{" "}
+                  <b>{capSeconds}s</b> of agent time — the cap is per attempt and does not
+                  scale, so more attempts cost more wall clock, not longer attempts.
+                  <br />
+                  <br />
+                  {totalAttempts} attempt(s) at {lanes} in parallel: at most{" "}
+                  <b>~{worstCaseMinutes} min</b>, typically far less, since most attempts
+                  finish well inside the cap.
+                </Info>
+              </label>
+              <NumberField value={attempts} onChange={setAttempts} />
+            </div>
+
+            <div className="field">
+              <label>
+                Concurrency
+                <Info>
+                  Attempts running at once, each with its own Postgres + Metabase. Bounded
+                  by memory at {defaults?.max_gyms ?? 3}.
+                </Info>
+              </label>
+              <NumberField value={concurrency} onChange={setConcurrency} />
+            </div>
           </div>
 
           <div className="field">
-            <label>Concurrency</label>
-            <input
-              type="number"
-              min={1}
-              max={3}
-              value={concurrency}
-              onChange={(e) =>
-                setConcurrency(Math.min(3, Math.max(1, Number(e.target.value))))
-              }
-            />
-            <div className="hint">Each attempt gets its own gym, so this is bounded by memory (max 3).</div>
+            <label>Model</label>
+            <select value={model} onChange={(e) => setModel(e.target.value)}>
+              {(defaults?.models ?? []).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
           </div>
 
-          <div className="field">
-            <label>Max steps per attempt (optional)</label>
-            <input
-              type="number"
-              min={1}
-              max={200}
-              placeholder="40"
-              value={maxSteps}
-              onChange={(e) =>
-                setMaxSteps(e.target.value === "" ? "" : Number(e.target.value))
-              }
-            />
-            <div className="hint">Set to 1–2 for a cheap plumbing check.</div>
-          </div>
+          <button
+            className="btn btn-sm"
+            style={{ marginBottom: 14 }}
+            onClick={() => setShowAgentControls((s) => !s)}
+          >
+            {showAgentControls ? "▾" : "▸"} More agent controls
+          </button>
 
-          <div className="field">
-            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input
-                type="checkbox"
-                checked={recordVideo}
-                onChange={(e) => setRecordVideo(e.target.checked)}
-                style={{ width: "auto" }}
-              />
-              Record video
-            </label>
-          </div>
+          {showAgentControls && (
+            <div className="sub-panel">
+              <div className="field-row">
+                <div className="field">
+                  <label>Temperature</label>
+                  <NumberField value={temperature} onChange={setTemperature} />
+                </div>
+                <div className="field">
+                  <label>Top P</label>
+                  <NumberField value={topP} onChange={setTopP} />
+                </div>
+                <div className="field">
+                  <label>Top K</label>
+                  <NumberField value={topK} onChange={setTopK} />
+                </div>
+              </div>
+              <div className="field">
+                <label>Max steps per attempt</label>
+                <NumberField
+                  value={maxSteps}
+                  onChange={setMaxSteps}
+                  placeholder={String(defaults?.max_steps ?? 40)}
+                />
+                <div className="hint">Set to 1–2 for a cheap plumbing check.</div>
+              </div>
+              <label
+                style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12 }}
+              >
+                <input
+                  type="checkbox"
+                  checked={recordVideo}
+                  onChange={(e) => setRecordVideo(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                Record video
+              </label>
+            </div>
+          )}
 
           <button
             className="btn btn-primary"
@@ -219,15 +349,8 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
             onClick={run}
             disabled={busy || selected.size === 0}
           >
-            {busy ? "Starting…" : `Run ${totalAttempts} attempt(s)`}
+            {busy ? "Starting…" : `Run ${totalAttempts} rollout(s)`}
           </button>
-
-          {totalAttempts > 6 && maxSteps === "" && (
-            <div className="hint" style={{ marginTop: 8, color: "var(--warn-fg)" }}>
-              Heads up: a full attempt costs roughly 500k tokens and 4–5 minutes, so this
-              run is around {(totalAttempts * 0.5).toFixed(1)}M tokens.
-            </div>
-          )}
         </div>
       </div>
 
@@ -255,13 +378,14 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
                 {job.status}
               </span>
               <span className="spacer" />
+              <span className="muted mono">{job.spec.agent_config?.model}</span>
               <span className="muted">
                 {job.spec.task_ids.length}×{job.spec.attempts_per_task}
               </span>
               <span className="pill pill-pass">{job.passed} passed</span>
               <span className="pill pill-fail">{job.failed} failed</span>
               {job.errored > 0 && (
-                <span className="pill pill-warn">{job.errored} errored</span>
+                <span className="pill pill-warn">{job.errored} not observed</span>
               )}
             </div>
           ))
