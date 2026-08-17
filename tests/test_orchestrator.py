@@ -12,6 +12,7 @@ enough. A nice side effect of the module-import convention.
 
 from __future__ import annotations
 
+import pathlib
 import threading
 from datetime import datetime, timezone
 
@@ -442,3 +443,65 @@ def test_attempt_file_refuses_path_traversal(monkeypatch) -> None:
     assert service.attempt_file(job.spec.job_id, attempt_id, "steps/step_000.png")
     assert service.attempt_file(job.spec.job_id, attempt_id, "../../../../etc/passwd") is None
     assert service.attempt_file(job.spec.job_id, attempt_id, "nope.png") is None
+
+
+# ----------------------------------------------------------------------------------------
+# State writes are best-effort: an error handler must not need the resource that failed
+# ----------------------------------------------------------------------------------------
+
+
+def test_enospc_while_persisting_does_not_kill_the_job(monkeypatch) -> None:
+    """The exact cascade that froze job-20260817-073007 at RUNNING with nothing running.
+
+    `write_job` raised ENOSPC, that escaped `run_job`, and the supervising thread died --
+    including the write that would have RECORDED the failure. So the job could neither
+    finish nor report why. Now persistence is best-effort: the run completes, the reason is
+    surfaced on the result, and the in-memory state stands.
+    """
+    stub_executor(monkeypatch, {("problem10", 0): AttemptStatus.CORRECT})
+
+    real_write = pathlib.Path.write_text
+
+    def full_disk(self, *args, **kwargs):
+        if self.name.startswith("job.json"):
+            raise OSError(28, "No space left on device")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", full_disk)
+
+    # Must return rather than raise.
+    job = service.submit_job(["problem10"], attempts_per_task=1, block=True)
+
+    assert job.status is JobStatus.COMPLETED, "a failed WRITE is not a failed run"
+    assert job.error and "could not persist" in job.error
+    # The attempt itself still counted -- its result came from the returned artifact, not
+    # from a file that could not be written.
+    assert job.passed == 1
+
+
+def test_a_failed_artifact_write_does_not_raise(tmp_path, monkeypatch) -> None:
+    """write_artifact is called from finalize(), which is called from the except handler
+    that is already handling a write failure. It must not be able to raise."""
+    artifact = make_artifact("problem10", 0, "job-x", AttemptStatus.ANSWERED)
+
+    def full_disk(self, *args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(pathlib.Path, "write_text", full_disk)
+    executor.write_artifact(artifact, tmp_path)  # must simply return
+
+
+def test_low_disk_stops_the_job_cleanly(monkeypatch) -> None:
+    """A trim regression must degrade into a partial result, not a crash at rollout 25.
+    Completed attempts stay counted and the reason is recorded."""
+    calls: list[tuple[str, int]] = []
+    stub_executor(monkeypatch, {}, record=calls)
+    monkeypatch.setattr(orchestrator, "_host_free_gib", lambda: 0.5)
+
+    job = service.submit_job(TASK_IDS, attempts_per_task=2, concurrency=1, block=True)
+
+    assert calls == [], "ran an attempt below the disk floor"
+    assert job.status is JobStatus.CANCELLED
+    assert job.error and "host disk" in job.error
+    # Nothing was attempted, so no row claims an attempt_id -- the UI reads that as "Not run".
+    assert all(a.attempt_id == "" for t in job.tasks for a in t.attempts)

@@ -278,6 +278,18 @@ class AttemptArtifact(BaseModel):
     # because silent teardown failure is how one bad attempt poisons a whole job.
     teardown_error: str | None = None
 
+    # Set when the host could not be told that the blocks Docker freed are free (see
+    # gym_stack.reclaim_host_disk). Same philosophy as teardown_error: reported, never
+    # raised, never changes the attempt's status.
+    trim_error: str | None = None
+
+    # Host sparse-image footprint vs what the guest filesystem reports as used, sampled
+    # after teardown. Recorded as a PAIR because the divergence is the whole diagnostic:
+    # two jobs died of host disk exhaustion while the guest sat at 4% used, and one number
+    # alone made that invisible for a full job.
+    host_image_gib: float | None = None
+    guest_used_gib: float | None = None
+
     started_at: datetime | None = None
     ended_at: datetime | None = None
     duration_s: float | None = None

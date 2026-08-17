@@ -22,8 +22,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -294,6 +296,87 @@ def _teardown(project: str, port: int) -> str | None:
     return None
 
 
+# ======================================================================================
+# Host disk reclaim
+# ======================================================================================
+
+# The bind mount that carries /var/lib/docker. Verified to be the right target: trimming it
+# reports real bytes ("620.1 MiB trimmed"), while trimming /mnt/lima-colima immediately after
+# reports 0 B -- they are the same filesystem, and this is the path Docker actually writes to.
+TRIM_TARGET = "/var/lib/docker"
+
+# fstrim walks the whole filesystem's free-block bitmap, so concurrent calls from the three
+# slots would duplicate the same work. Serialised rather than deduplicated: a second trim is
+# cheap (<1s) and a lock is simpler than tracking who trimmed when.
+_trim_lock = threading.Lock()
+
+
+def reclaim_host_disk() -> str | None:
+    """Tell the host that blocks Docker just freed are actually free.
+
+    `docker rm` frees blocks inside the VM's ext4, but the data disk is mounted WITHOUT
+    `discard`, so nothing informs the underlying sparse image -- it grows ~1 GiB per attempt
+    and never shrinks. Two 30-rollout jobs died of host disk exhaustion this way while the
+    guest filesystem sat at 4% used.
+
+    fstrim deletes nothing and touches no live data: it walks the free-block bitmap and
+    issues discards, which the VMM turns into hole-punches on the sparse file. Safe on a
+    mounted, live filesystem.
+
+    Returns None on success, an error string otherwise. Never raises.
+    """
+    # Only colima owns a sparse image we can reclaim. Under Docker Desktop or native Linux
+    # there is nothing here for us to do, and reporting an error every attempt would turn a
+    # non-issue into 30 lines of noise.
+    if shutil.which("colima") is None:
+        return None
+
+    with _trim_lock:
+        try:
+            proc = subprocess.run(
+                ["colima", "ssh", "--", "sudo", "fstrim", TRIM_TARGET],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except Exception as exc:  # noqa: BLE001 -- reclaim must never fail an attempt
+            return f"{type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        return ((proc.stderr or "").strip() or "fstrim failed")[:200]
+    return None
+
+
+def disk_usage() -> tuple[float | None, float | None]:
+    """(host image GiB, guest used GiB) -- the pair whose divergence IS the bug.
+
+    Recorded per attempt because a single number explains nothing: the first exhaustion was
+    misdiagnosed for a whole job precisely because the guest reported 4% used while the host
+    image had reached 23 GiB. Seeing both together makes the leak obvious within one attempt.
+    """
+    host = guest = None
+    try:
+        disk = pathlib.Path.home() / ".colima/_lima/_disks/colima/datadisk"
+        if disk.is_file():
+            # st_blocks counts ALLOCATED blocks, so it reports the sparse file's real
+            # footprint. st_size would report the 60 GiB it merely claims to be.
+            host = disk.stat().st_blocks * 512 / 2**30
+    except OSError:
+        pass
+    try:
+        if shutil.which("colima"):
+            out = subprocess.run(
+                ["colima", "ssh", "--", "df", "-k", "--output=used", TRIM_TARGET],
+                capture_output=True, text=True, timeout=30,
+            )
+            if out.returncode == 0:
+                lines = [ln for ln in out.stdout.split() if ln.isdigit()]
+                if lines:
+                    guest = int(lines[-1]) / 2**20
+    except Exception:  # noqa: BLE001 -- instrumentation must never fail an attempt
+        pass
+    return host, guest
+
+
 def _assert_pristine(project: str, port: int) -> dict[str, int]:
     """Prove the attempt starts from the seeded state, rather than assuming it.
 
@@ -338,8 +421,13 @@ def ephemeral_gym(
     on_phase: PhaseCallback | None = None,
     on_pristine: Callable[[dict[str, int]], None] | None = None,
     on_teardown_error: Callable[[str], None] | None = None,
+    on_disk: Callable[[str | None, float | None, float | None], None] | None = None,
 ) -> Iterator[tuple[str, pathlib.Path]]:
-    """Yield (gym_url, storage_state_path) for a stack that exists only inside this block."""
+    """Yield (gym_url, storage_state_path) for a stack that exists only inside this block.
+
+    `on_disk(trim_error, host_image_gib, guest_used_gib)` fires after teardown, once the
+    freed blocks have been returned to the host.
+    """
 
     def phase(value: AttemptPhase) -> None:
         if on_phase:
@@ -399,6 +487,17 @@ def ephemeral_gym(
                     on_teardown_error(teardown_error)
                 else:
                     print(f"[gym_stack] {teardown_error}", flush=True)
+
+            # Only meaningful AFTER the containers and volumes are gone -- that is what makes
+            # the blocks free for fstrim to hand back. Placed here rather than inside
+            # _teardown() so that function stays a pure destroy-and-verify; this is the same
+            # always-executed path, since _teardown has no other caller.
+            trim_error = reclaim_host_disk()
+            host_gib, guest_gib = disk_usage()
+            if on_disk:
+                on_disk(trim_error, host_gib, guest_gib)
+            elif trim_error:
+                print(f"[gym_stack] host disk reclaim failed: {trim_error}", flush=True)
 
 
 # ======================================================================================

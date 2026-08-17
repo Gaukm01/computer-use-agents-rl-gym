@@ -103,12 +103,30 @@ def attempt_dir(attempt_id: str, job_id: str | None = None) -> pathlib.Path:
 
 
 def write_artifact(artifact: AttemptArtifact, out_dir: pathlib.Path) -> None:
-    """Atomic-ish write: temp file then replace, so a reader never sees half a document."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / ARTIFACT_NAME
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(artifact.model_dump_json(indent=2))
-    tmp.replace(path)
+    """Atomic-ish write: temp file then replace, so a reader never sees half a document.
+
+    Best-effort by design. An OSError here -- in practice ENOSPC -- must not propagate: this
+    is called from `finalize()`, which is itself called from the `except` handler that is
+    already handling a failure, and on a full disk the second write fails exactly like the
+    first. That is how two attempts ended up frozen at IN_PROGRESS with `error: None`: the
+    classification was correct in memory and could not be persisted.
+
+    The in-memory artifact is authoritative; the file is a copy of it.
+    """
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / ARTIFACT_NAME
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(artifact.model_dump_json(indent=2))
+        tmp.replace(path)
+    except OSError as exc:
+        # Deliberately NOT `except Exception`: a pydantic serialization bug is our bug and
+        # must still surface loudly.
+        print(
+            f"[executor] could not persist artifact for {artifact.attempt_id}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def read_artifact(out_dir: pathlib.Path) -> AttemptArtifact | None:
@@ -350,6 +368,15 @@ def execute_attempt(
         final.teardown_error = message
         write_artifact(final, out_dir)
 
+    def on_disk(trim_error: str | None, host_gib: float | None, guest_gib: float | None) -> None:
+        """Same amend-don't-clobber rule as on_teardown_error: this fires after the worker
+        has written its result."""
+        final = read_artifact(out_dir) or pending
+        final.trim_error = trim_error
+        final.host_image_gib = host_gib
+        final.guest_used_gib = guest_gib
+        write_artifact(final, out_dir)
+
     def fail(reason: StopReason, message: str) -> AttemptArtifact:
         pending.status = AttemptStatus.NOT_OBSERVED
         pending.stop_reason = reason
@@ -371,6 +398,7 @@ def execute_attempt(
             on_phase=on_phase,
             on_pristine=on_pristine,
             on_teardown_error=on_teardown_error,
+            on_disk=on_disk,
         ) as (gym_url, storage_state):
             pending.gym_url = gym_url
             write_artifact(pending, out_dir)

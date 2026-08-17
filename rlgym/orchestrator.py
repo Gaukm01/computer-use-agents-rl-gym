@@ -29,6 +29,8 @@ files needs no callback plumbing through the subprocess boundary.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -54,6 +56,20 @@ JOB_FILE = "job.json"
 # takes seconds, so this is fast enough to look live and slow enough to be free.
 WATCH_INTERVAL_S = 2.0
 
+# Refuse to start another attempt below this much free host disk. A backstop, not the fix:
+# gym_stack.reclaim_host_disk() is what keeps the VM image flat. This exists so that if the
+# trim ever regresses, a job degrades into a clean partial result -- graded attempts intact,
+# reason recorded -- instead of crashing at rollout 25 with a frozen job.json.
+#
+# 8 GiB is deliberately generous. An attempt needs well under 1 GiB, but the failure being
+# guarded against is one that only becomes visible after it is too late to report.
+FREE_GIB_FLOOR = 8.0
+
+
+def _host_free_gib() -> float:
+    st = os.statvfs(os.path.expanduser("~"))
+    return st.f_bavail * st.f_frsize / 2**30
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -70,13 +86,31 @@ def job_dir(job_id: str):
 
 def write_job(result: JobResult) -> None:
     """Persist job state. Same temp-then-replace trick as artifacts, so a poller never
-    reads a half-written document."""
-    out = job_dir(result.spec.job_id)
-    out.mkdir(parents=True, exist_ok=True)
-    path = out / JOB_FILE
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(result.model_dump_json(indent=2))
-    tmp.replace(path)
+    reads a half-written document.
+
+    Best-effort, like write_artifact. An OSError here must not propagate: every call site
+    funnels through this function, including the one inside the `except` block that records
+    a job as FAILED -- so on a full disk the attempt to report the failure raised the same
+    failure, escaped `run_job`, and killed the supervising thread. The job then sat at
+    RUNNING with nothing running.
+
+    The in-memory JobResult is authoritative, and the per-attempt artifacts remain the
+    source of truth regardless. Deliberately NOT `except Exception`: a serialization bug is
+    ours and must still surface.
+    """
+    try:
+        out = job_dir(result.spec.job_id)
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / JOB_FILE
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(result.model_dump_json(indent=2))
+        tmp.replace(path)
+    except OSError as exc:
+        message = f"could not persist job state: {exc}"
+        print(f"[orchestrator] {result.spec.job_id}: {message}", file=sys.stderr, flush=True)
+        # Surfaced on the object so it reaches the caller and any later successful write,
+        # without pretending the run itself failed -- the graded attempts are still valid.
+        result.error = result.error or message
 
 
 def read_job(job_id: str) -> JobResult | None:
@@ -344,6 +378,20 @@ def run_job(
     ]
 
     def run_attempt(task: Task, index: int) -> None:
+        # Checked per attempt rather than once up front: the whole point is to catch growth
+        # that happens DURING a job. Returning early leaves this slot's row without an
+        # attempt_id, which the UI already renders as "Not run" -- the correct outcome.
+        free = _host_free_gib()
+        if free < FREE_GIB_FLOOR:
+            cancel.set()
+            with lock:
+                result.error = result.error or (
+                    f"stopped: host disk down to {free:.1f} GiB, below the "
+                    f"{FREE_GIB_FLOOR:.0f} GiB floor. Completed attempts are unaffected."
+                )
+                _publish(force=True)
+            return
+
         artifact = executor.execute_attempt(
             task,
             agent_config=spec.agent_config,

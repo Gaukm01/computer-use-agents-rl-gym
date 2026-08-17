@@ -245,3 +245,71 @@ def test_teardown_failure_does_not_mask_the_attempt_result(tmp_path, monkeypatch
         assert url.startswith("http://localhost:")
 
     assert reported and "teardown incomplete" in reported[0]
+
+
+# ----------------------------------------------------------------------------------------
+# Host disk reclaim -- the fix for two 30-rollout jobs dying of disk exhaustion
+# ----------------------------------------------------------------------------------------
+
+
+def test_reclaim_reports_failure_instead_of_raising(monkeypatch) -> None:
+    """Same philosophy as teardown_error: an operational problem must never take down the
+    attempt's own result."""
+    monkeypatch.setattr(gym_stack.shutil, "which", lambda name: "/usr/bin/colima")
+    monkeypatch.setattr(
+        gym_stack.subprocess,
+        "run",
+        lambda *a, **k: fake_result(returncode=1, stderr="fstrim: not a mountpoint"),
+    )
+    error = gym_stack.reclaim_host_disk()
+    assert error and "not a mountpoint" in error
+
+
+def test_reclaim_is_silent_where_there_is_nothing_to_reclaim(monkeypatch) -> None:
+    """Only colima owns a sparse image we can trim. Under Docker Desktop or native Linux,
+    reporting an error every attempt would turn a non-issue into 30 lines of noise."""
+    monkeypatch.setattr(gym_stack.shutil, "which", lambda name: None)
+    assert gym_stack.reclaim_host_disk() is None
+
+
+def test_reclaim_never_raises_even_on_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(gym_stack.shutil, "which", lambda name: "/usr/bin/colima")
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="fstrim", timeout=120)
+
+    monkeypatch.setattr(gym_stack.subprocess, "run", boom)
+    error = gym_stack.reclaim_host_disk()
+    assert error and "TimeoutExpired" in error
+
+
+def test_trim_runs_after_teardown_not_before(tmp_path, monkeypatch) -> None:
+    """Order matters: blocks are only free to hand back once the containers and volumes are
+    gone. Trimming first would reclaim nothing."""
+    order: list[str] = []
+    monkeypatch.setattr(gym_stack, "_wait_postgres_healthy", lambda *a, **k: None)
+    monkeypatch.setattr(gym_stack, "_restore_dump", lambda *a, **k: None)
+    monkeypatch.setattr(gym_stack, "_wait_metabase_ready", lambda *a, **k: None)
+    monkeypatch.setattr(gym_stack, "mint_session", lambda url: "tok")
+    monkeypatch.setattr(service, "check_auth", lambda *a, **k: (True, True, "ok"))
+    monkeypatch.setattr(gym_stack, "_assert_pristine", lambda *a, **k: {"recent_views": 73})
+    monkeypatch.setattr(gym_stack, "_compose", lambda *a, **k: fake_result())
+    monkeypatch.setattr(
+        gym_stack, "_teardown", lambda p, port: (order.append("teardown"), None)[1]
+    )
+    monkeypatch.setattr(
+        gym_stack, "reclaim_host_disk", lambda: (order.append("trim"), None)[1]
+    )
+    monkeypatch.setattr(gym_stack, "disk_usage", lambda: (4.4, 4.4))
+
+    seen: list[tuple] = []
+    with gym_stack.ephemeral_gym(
+        "t-a0-abcd",
+        storage_state_path=tmp_path / "s.json",
+        on_disk=lambda *args: seen.append(args),
+    ):
+        pass
+
+    assert order == ["teardown", "trim"]
+    # Both numbers reach the artifact: their DIVERGENCE is the diagnostic, not either alone.
+    assert seen == [(None, 4.4, 4.4)]
