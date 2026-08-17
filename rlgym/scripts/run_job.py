@@ -22,7 +22,7 @@ import sys
 from dotenv import load_dotenv
 
 from .. import orchestrator, service, vendor
-from ..schemas import JobResult, JobStatus
+from ..schemas import AgentConfig, JobResult, JobStatus
 
 load_dotenv(vendor.PROJECT_ROOT / ".env")
 
@@ -46,9 +46,20 @@ def render(job: JobResult) -> None:
         f"{spec.attempts_per_task} attempt(s) = {spec.total_attempts}, "
         f"concurrency {spec.concurrency} (each attempt gets its own gym)"
     )
+    agent = spec.agent_config
+    print(
+        f"{BOLD}agent{RESET}        {agent.model} "
+        f"(temp {agent.temperature}, top_p {agent.top_p}, top_k {agent.top_k})"
+    )
     if job.duration_s:
         print(f"{BOLD}duration{RESET}     {job.duration_s:.0f}s")
     print(f"{BOLD}tokens{RESET}       {job.total_tokens:,}")
+    if job.stats.avg_duration_s is not None:
+        print(
+            f"{BOLD}per attempt{RESET}  {job.stats.avg_duration_s:.0f}s avg, "
+            f"{job.stats.avg_steps:.1f} steps avg over "
+            f"{job.stats.observed_attempts} observed"
+        )
     print()
 
     header = f"{'task':<12} {'pass@k':<8} {'passed':<7} {'failed':<7} {'errored':<8} {'rate':<7}"
@@ -57,10 +68,9 @@ def render(job: JobResult) -> None:
     for task in job.tasks:
         rate = f"{task.pass_rate:.0%}" if task.pass_rate is not None else "-"
         mark = f"{GREEN}yes{RESET}" if task.pass_at_k else f"{RED}no{RESET} "
-        flag = f"  {YELLOW}low-confidence ({task.valid_attempts}/{spec.attempts_per_task} valid){RESET}" if task.low_confidence else ""
         print(
             f"{task.task_id:<12} {mark:<17} {task.passed:<7} {task.failed:<7} "
-            f"{task.errored:<8} {rate:<7}{flag}"
+            f"{task.errored:<8} {rate:<7}"
         )
 
     print()
@@ -101,11 +111,14 @@ def main() -> int:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=3,
+        default=1,
         help="Parallel attempts, each with its own gym. Capped at ports.MAX_GYMS (memory-bound).",
     )
     parser.add_argument("--model", default=None)
     parser.add_argument("--hint", default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--top-p", type=float, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument("--headed", action="store_true")
@@ -123,10 +136,20 @@ def main() -> int:
                 if args.tasks
                 else None
             )
+            sampling = {
+                key: value
+                for key, value in (
+                    ("temperature", args.temperature),
+                    ("top_p", args.top_p),
+                    ("top_k", args.top_k),
+                )
+                if value is not None
+            }
             job = service.submit_job(
                 task_ids,
                 attempts_per_task=args.attempts,
                 concurrency=args.concurrency,
+                agent=AgentConfig(**sampling),
                 model=args.model,
                 hint=args.hint,
                 max_steps=args.max_steps,

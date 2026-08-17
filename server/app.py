@@ -24,7 +24,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rlgym import ports, service, vendor
-from rlgym.schemas import HealthStatus, JobResult, Task
+from rlgym.schemas import (
+    COMPUTER_USE_MODELS,
+    AgentConfig,
+    HealthStatus,
+    JobResult,
+    Limits,
+    Task,
+)
 
 app = FastAPI(
     title="Metabase Computer-Use RL Gym",
@@ -48,21 +55,53 @@ WEB_DIST = vendor.PROJECT_ROOT / "web" / "dist"
 # ======================================================================================
 
 
+class AgentParams(BaseModel):
+    """The policy to run, and how to sample from it.
+
+    Sent as one object rather than loose fields so it maps straight onto `AgentConfig` and
+    lands in the job spec intact -- the job page then reports the exact policy that
+    produced its numbers, instead of the UI's idea of what it asked for.
+    """
+
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1, le=200)
+
+
 class SubmitJobRequest(BaseModel):
     task_ids: list[str] | None = Field(
         default=None, description="Which tasks to run. Omit for all tasks in the file."
     )
-    attempts_per_task: int = Field(default=1, ge=1, le=20)
-    concurrency: int = Field(default=3, ge=1, le=ports.MAX_GYMS)
+    attempts_per_task: int = Field(default=1, ge=1, le=50)
+    concurrency: int = Field(default=1, ge=1, le=ports.MAX_GYMS)
     tasks_file: str | None = Field(
         default=None,
         description="Path returned by /api/tasks/upload. Omit for the bundled tasks.json.",
     )
+    agent: AgentParams | None = None
     model: str | None = None
     hint: str | None = None
     max_steps: int | None = Field(default=None, ge=1, le=200)
     timeout_s: int | None = Field(default=None, ge=30, le=3600)
     record_video: bool = True
+
+    def agent_config(self) -> AgentConfig:
+        """Only fields the caller actually set are applied, so an omitted parameter keeps
+        the harness default rather than being overwritten with a null."""
+        supplied = self.agent.model_dump(exclude_none=True) if self.agent else {}
+        return AgentConfig(**supplied)
+
+
+class AgentDefaults(BaseModel):
+    """What the UI needs to render the agent controls without hard-coding our defaults."""
+
+    models: list[str]
+    default: AgentConfig
+    max_gyms: int
+    # Per-attempt wall clock, so the UI can be honest about what a run will cost.
+    timeout_s: int
+    max_steps: int
 
 
 class UploadTasksResponse(BaseModel):
@@ -84,6 +123,23 @@ def health() -> HealthStatus:
     Surfaced up front so nobody debugs a failed job when the real problem is setup.
     """
     return service.health()
+
+
+@app.get("/api/agent-defaults", response_model=AgentDefaults)
+def agent_defaults() -> AgentDefaults:
+    """The agent controls the UI should offer, and the values it should start from.
+
+    Served rather than hard-coded in the frontend so the two cannot drift: whatever the
+    harness treats as default is what the form shows.
+    """
+    limits = Limits()
+    return AgentDefaults(
+        models=COMPUTER_USE_MODELS,
+        default=AgentConfig(),
+        max_gyms=ports.MAX_GYMS,
+        timeout_s=limits.timeout_s,
+        max_steps=limits.max_steps,
+    )
 
 
 # ======================================================================================
@@ -132,6 +188,7 @@ def submit_job(request: SubmitJobRequest) -> JobResult:
             request.task_ids,
             attempts_per_task=request.attempts_per_task,
             concurrency=request.concurrency,
+            agent=request.agent_config(),
             model=request.model,
             hint=request.hint,
             max_steps=request.max_steps,

@@ -21,6 +21,7 @@ from rlgym import executor, orchestrator, service, vendor
 from rlgym.schemas import (
     AgentConfig,
     AttemptArtifact,
+    AttemptPhase,
     AttemptStatus,
     EvaluationResult,
     JobStatus,
@@ -125,7 +126,6 @@ def test_pass_at_k_is_any_valid_success() -> None:
     assert task.pass_at_k is True
     assert (task.passed, task.failed, task.errored) == (1, 2, 0)
     assert task.pass_rate == pytest.approx(1 / 3)
-    assert task.low_confidence is False
 
 
 def test_errored_attempts_leave_the_denominator() -> None:
@@ -137,8 +137,6 @@ def test_errored_attempts_leave_the_denominator() -> None:
     assert task.valid_attempts == 2
     assert task.pass_rate == pytest.approx(0.5)
     assert task.errored == 1
-    # Fewer valid samples than requested, so pass@3 here really rests on 2.
-    assert task.low_confidence is True
 
 
 def test_all_errored_is_ungraded_not_failed() -> None:
@@ -147,13 +145,11 @@ def test_all_errored_is_ungraded_not_failed() -> None:
     assert task.valid_attempts == 0
     assert task.pass_rate is None
     assert task.pass_at_k is False
-    assert task.low_confidence is True
 
 
 def test_full_k_with_no_errors_is_confident() -> None:
     task = TaskResult(task_id="t", attempts=[summary(0, 0), summary(1, 0)])
     task.recompute(requested_attempts=2)
-    assert task.low_confidence is False
     assert task.pass_rate == 0.0
 
 
@@ -175,18 +171,17 @@ def test_job_runs_every_task_times_k(monkeypatch) -> None:
     assert all(t.total_attempts == 2 for t in job.tasks)
 
 
-def test_attempts_are_ordered_attempt_major(monkeypatch) -> None:
-    """Every task's attempt 0 before any task's attempt 1, so a half-finished job has
-    one sample of everything rather than everything of half."""
+def test_attempts_are_ordered_task_major(monkeypatch) -> None:
+    """A task's K attempts run together, so its pass@k is final as early as possible.
+    A half-finished job then has complete, usable results for half the tasks rather than
+    one sample of every task and nothing settled."""
     calls: list[tuple[str, int]] = []
     # concurrency=1 makes submission order observable.
     stub_executor(monkeypatch, {}, record=calls)
 
     service.submit_job(TASK_IDS, attempts_per_task=2, concurrency=1, block=True)
 
-    first_round = calls[: len(TASK_IDS)]
-    assert {index for _task, index in first_round} == {0}
-    assert {index for _task, index in calls[len(TASK_IDS) :]} == {1}
+    assert calls == [(task_id, index) for task_id in TASK_IDS for index in (0, 1)]
 
 
 def test_concurrency_is_respected(monkeypatch) -> None:
@@ -266,6 +261,121 @@ def test_cancel_stops_scheduling(monkeypatch) -> None:
 
     assert job.status is JobStatus.CANCELLED
     assert job.completed_attempts == 0
+
+
+# ----------------------------------------------------------------------------------------
+# Live progress: every requested attempt is visible before it runs
+# ----------------------------------------------------------------------------------------
+
+
+def test_every_requested_attempt_has_a_row_from_the_start(monkeypatch) -> None:
+    """The UI renders the whole T x K grid, so an attempt still in the queue needs a row
+    to occupy. Cancelling before anything runs leaves exactly those placeholders."""
+    stub_executor(monkeypatch, {})
+    cancel = threading.Event()
+    cancel.set()
+
+    spec = orchestrator.build_spec(TASK_IDS, attempts_per_task=3, concurrency=1)
+    job = orchestrator.run_job(spec, cancel=cancel)
+
+    assert sum(len(t.attempts) for t in job.tasks) == len(TASK_IDS) * 3
+    for task in job.tasks:
+        assert [a.attempt_index for a in task.attempts] == [0, 1, 2]
+        assert all(a.status is AttemptStatus.QUEUED for a in task.attempts)
+        # No attempt directory exists yet, which is what makes the row unopenable.
+        assert all(a.attempt_id == "" for a in task.attempts)
+
+
+def test_unstarted_attempts_are_not_counted_as_errors(monkeypatch) -> None:
+    """A queued attempt has reward None, exactly like an infrastructure failure. Counting
+    them the same way would report a job as broken the moment it was submitted."""
+    stub_executor(monkeypatch, {})
+    cancel = threading.Event()
+    cancel.set()
+
+    spec = orchestrator.build_spec(TASK_IDS, attempts_per_task=2, concurrency=1)
+    job = orchestrator.run_job(spec, cancel=cancel)
+
+    assert job.errored == 0
+    assert job.queued_attempts == len(TASK_IDS) * 2
+    assert job.total_attempts == len(TASK_IDS) * 2
+
+
+def write_live(job_id: str, task_id: str, index: int, *, phase, status, started=None):
+    artifact = make_artifact(task_id, index, job_id, status)
+    artifact.attempt_id = f"{task_id}-a{index}-{phase.value.lower()}"
+    artifact.phase = phase
+    artifact.started_at = started or datetime.now(timezone.utc)
+    executor.write_artifact(
+        artifact, executor.attempt_dir(artifact.attempt_id, job_id)
+    )
+    return artifact
+
+
+def test_in_flight_attempts_report_their_phase() -> None:
+    """Provisioning takes ~35s before the agent does anything. Without the phase an
+    attempt looks hung; this is what the watcher reads off disk."""
+    write_live(
+        "job-x",
+        "problem10",
+        0,
+        phase=AttemptPhase.PROVISIONING,
+        status=AttemptStatus.IN_PROGRESS,
+    )
+    found = orchestrator.load_attempts("job-x")
+
+    row = found[("problem10", 0)]
+    assert row.status is AttemptStatus.IN_PROGRESS
+    assert row.phase is AttemptPhase.PROVISIONING
+    assert row.is_terminal is False
+    # Still not done, so resume must not treat it as finished work.
+    assert ("problem10", 0) not in orchestrator.load_completed_attempts("job-x")
+
+
+def test_a_finished_attempt_beats_an_abandoned_one() -> None:
+    """An interrupted run leaves its dead IN_PROGRESS artifact on disk, and the retry gets
+    a fresh directory. If the stale one won, a completed slot would show as forever
+    running."""
+    stale = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    write_live(
+        "job-y",
+        "problem10",
+        0,
+        phase=AttemptPhase.RUNNING,
+        status=AttemptStatus.IN_PROGRESS,
+        started=stale,
+    )
+    write_live(
+        "job-y",
+        "problem10",
+        0,
+        phase=AttemptPhase.DONE,
+        status=AttemptStatus.CORRECT,
+    )
+
+    row = orchestrator.load_attempts("job-y")[("problem10", 0)]
+    assert row.status is AttemptStatus.CORRECT
+    assert row.reward == 1
+
+
+def test_run_stats_average_over_observed_attempts_only() -> None:
+    """An attempt that died in provisioning contributes 0 steps and a few seconds.
+    Averaging it in would make a run look cheaper and faster than it is."""
+    ran = summary(0, 1)
+    ran.duration_s, ran.step_count, ran.total_tokens = 300.0, 20, 400_000
+    also_ran = summary(1, 0)
+    also_ran.duration_s, also_ran.step_count, also_ran.total_tokens = 100.0, 10, 200_000
+    died = summary(2, None)
+    died.duration_s, died.step_count, died.total_tokens = 4.0, 0, 0
+
+    task = TaskResult(task_id="t", attempts=[ran, also_ran, died])
+    task.recompute(requested_attempts=3)
+
+    assert task.stats.observed_attempts == 2
+    assert task.stats.avg_duration_s == pytest.approx(200.0)
+    assert task.stats.avg_steps == pytest.approx(15.0)
+    # Tokens are billed whatever the outcome, so they are summed over everything.
+    assert task.stats.total_tokens == 600_000
 
 
 def test_job_state_is_persisted_for_polling(monkeypatch) -> None:

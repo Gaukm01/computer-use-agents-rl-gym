@@ -259,14 +259,11 @@ def save_tasks_file(content: bytes | str, filename: str = "tasks.json") -> tuple
             task = Task.model_validate(entry)
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"task {i} ({entry.get('id')!r}) is invalid: {exc}") from exc
-        # The answer is a JSON *string*; catching a bad one here beats discovering it
-        # after an expensive run has already finished.
-        try:
-            task.expected_output()
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(
-                f"task {task.id!r}: 'answer' must be a JSON string, but failed to parse: {exc}"
-            ) from exc
+        # Deliberately NOT checking that `answer` parses as JSON. A task whose answer is
+        # `Q4` or `126` is a perfectly gradeable task, and rejecting the whole file over it
+        # would enforce an encoding convention we invented rather than one the task set
+        # owes us. Task.expected_output() falls back to the raw string, and the grader
+        # compares it on its merits.
         if task.id in seen:
             raise ValueError(f"duplicate task id {task.id!r}")
         seen.add(task.id)
@@ -291,6 +288,7 @@ def submit_job(
     *,
     attempts_per_task: int = 1,
     concurrency: int = 3,
+    agent: AgentConfig | None = None,
     model: str | None = None,
     hint: str | None = None,
     max_steps: int | None = None,
@@ -305,6 +303,11 @@ def submit_job(
 
     `task_ids=None` means every task in the file. `block=True` runs inline instead of in a
     thread, which is what tests and the CLI want.
+
+    `agent` carries the whole policy configuration -- model and sampling parameters -- and
+    is recorded verbatim in the job spec, so a job's numbers stay attributable to the exact
+    policy that produced them. `model`/`hint` are conveniences that override single fields,
+    for callers with one thing to change.
     """
     available = tasks_module.load_task_map(tasks_file)
     selected = list(available) if not task_ids else task_ids
@@ -319,15 +322,15 @@ def submit_job(
     if concurrency < 1:
         raise ValueError("concurrency must be >= 1")
 
+    overrides = {k: v for k, v in {"model": model, "hint": hint}.items() if v is not None}
+    agent_config = (agent or AgentConfig()).model_copy(update=overrides)
+
     defaults = Limits()
     spec = orchestrator.build_spec(
         selected,
         attempts_per_task=attempts_per_task,
         concurrency=concurrency,
-        agent_config=AgentConfig(
-            model=model or AgentConfig().model,
-            hint=hint,
-        ),
+        agent_config=agent_config,
         limits=Limits(
             max_steps=max_steps or defaults.max_steps,
             timeout_s=timeout_s or defaults.timeout_s,

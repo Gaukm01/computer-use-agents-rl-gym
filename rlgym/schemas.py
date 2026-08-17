@@ -127,8 +127,9 @@ class Task(BaseModel):
     id: str
     task: str = Field(description="The natural-language prompt shown to the agent.")
     answer: str = Field(
-        description="Expected output as a JSON *string*, exactly as it appears in "
-        "tasks.json. Use expected_output() to get the parsed dict."
+        description="Expected output exactly as it appears in tasks.json -- usually a "
+        "JSON *string* (double-encoded), but a bare value is accepted too. Use "
+        "expected_output() to get the comparable form."
     )
 
     # Optional per-task budget overrides.
@@ -136,8 +137,30 @@ class Task(BaseModel):
     timeout_s: int | None = None
 
     def expected_output(self) -> Any:
-        """Parse the stored answer. tasks.json holds it double-encoded."""
-        return json.loads(self.answer)
+        """The answer in comparable form.
+
+        tasks.json holds answers double-encoded, so the normal path is json.loads. An
+        answer that is not JSON is returned as the plain string it is, rather than raising:
+        a task whose answer is `Q4` is a perfectly gradeable task, and refusing to load the
+        file over it would reject a valid task set for a formatting convention we invented.
+        """
+        try:
+            return json.loads(self.answer)
+        except (TypeError, ValueError):
+            return self.answer
+
+
+# Models verified in Phase 2 to accept the ComputerUse tool with our API key -- all five
+# returned OK. Enumerated rather than fetched from the API, whose model list runs to
+# hundreds of entries, almost none of which can drive a browser. Anything not on this list
+# can still be passed explicitly; this is what the UI offers, not what the harness allows.
+COMPUTER_USE_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-2.5-computer-use-preview-10-2025",
+]
 
 
 class AgentConfig(BaseModel):
@@ -151,7 +174,22 @@ class AgentConfig(BaseModel):
     # attempts can be grouped separately.
     hint: str | None = None
 
+    # Sampling parameters, part of the attempt's identity: the same model at a different
+    # temperature is a different policy, so a job is not comparable to another unless
+    # these match. Defaults are the values the harness has always used.
     temperature: float = 1.0
+    top_p: float = 0.95
+    top_k: int = 40
+
+    # Report the remaining step budget to the agent, and warn it as the cap approaches.
+    #
+    # OFF by default, and the platform never turns it on. It exists because we built it
+    # after watching an agent hold the right value on screen at step 12 and then burn its
+    # remaining 28 steps second-guessing itself -- it had no way to know the budget was
+    # running out. Reporting budget is common in agent harnesses, but it is scaffolding we
+    # supply rather than capability the agent has, so it stays a declared option rather
+    # than a silent default.
+    budget_reminders: bool = False
 
     # Action names to refuse if the model calls them. EMPTY BY DEFAULT -- nothing is
     # blocked. The agent may use the SQL editor or the query builder, its choice. This
@@ -263,10 +301,6 @@ class AttemptArtifact(BaseModel):
 
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
-    # Strategy logging: did the agent reach for the native SQL editor rather than the
-    # query builder? Not a restriction -- just lets pass rates be split by approach.
-    used_sql_editor: bool = False
-
     # Actions the domain lock or prohibited_actions refused, and safety confirmations
     # auto-acknowledged. Both are counted so a run's behaviour is auditable.
     refusals: list[str] = Field(default_factory=list)
@@ -280,6 +314,10 @@ class AttemptArtifact(BaseModel):
     @property
     def reward(self) -> int | None:
         return reward_for_status(self.status)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in TERMINAL_STATUSES
 
     @pydantic.field_validator("status", mode="before")
     @classmethod
@@ -359,13 +397,19 @@ class JobSpec(BaseModel):
 
 class AttemptSummary(BaseModel):
     """A row in the UI's attempt list. Deliberately small -- the full trajectory stays
-    in artifact.json and is fetched only when someone opens one attempt."""
+    in artifact.json and is fetched only when someone opens one attempt.
 
-    attempt_id: str
+    A summary exists for every requested attempt from the moment the job starts, including
+    ones that have not run yet: the UI shows the whole T x K grid, so an attempt still in
+    the queue needs a row to occupy. Those placeholders carry no `attempt_id` -- there is
+    no attempt directory yet -- which is also what tells the UI the row is not openable.
+    """
+
+    attempt_id: str = ""
     task_id: str
     attempt_index: int
 
-    status: AttemptStatus
+    status: AttemptStatus = AttemptStatus.QUEUED
     phase: AttemptPhase = AttemptPhase.QUEUED
     reward: int | None = None
     verdict: str | None = None
@@ -374,7 +418,6 @@ class AttemptSummary(BaseModel):
     step_count: int = 0
     duration_s: float | None = None
     total_tokens: int = 0
-    used_sql_editor: bool = False
 
     error: str | None = None
     diff: str | None = None
@@ -382,11 +425,53 @@ class AttemptSummary(BaseModel):
     has_video: bool = False
     screenshot_count: int = 0
 
+    @property
+    def started(self) -> bool:
+        """False for a placeholder -- nothing has been provisioned for it yet."""
+        return bool(self.attempt_id)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in TERMINAL_STATUSES
+
     @pydantic.field_validator("status", mode="before")
     @classmethod
     def _translate_legacy_status(cls, value):
         """job.json is a wire format too -- old summaries must keep loading."""
         return _LEGACY_STATUS.get(value, value) if isinstance(value, str) else value
+
+
+class RunStats(BaseModel):
+    """What a set of attempts cost. Averaged over *observed* attempts only.
+
+    An attempt that died in provisioning contributes 0 steps and a few seconds; including
+    those would drag both averages toward zero and make a run look cheaper and faster than
+    it is. Only attempts the agent actually ran are counted.
+    """
+
+    observed_attempts: int = 0
+    total_tokens: int = 0
+    total_duration_s: float = 0.0
+    avg_duration_s: float | None = None
+    avg_steps: float | None = None
+    total_steps: int = 0
+
+    @classmethod
+    def over(cls, attempts: list[AttemptSummary]) -> RunStats:
+        observed = [a for a in attempts if a.is_terminal and a.reward is not None]
+        # Tokens are billed whatever the outcome, so they are summed over everything that
+        # ran -- unlike the averages, which describe a typical successful rollout.
+        tokens = sum(a.total_tokens for a in attempts)
+        durations = [a.duration_s for a in observed if a.duration_s is not None]
+        steps = [a.step_count for a in observed]
+        return cls(
+            observed_attempts=len(observed),
+            total_tokens=tokens,
+            total_duration_s=sum(durations),
+            avg_duration_s=sum(durations) / len(durations) if durations else None,
+            avg_steps=sum(steps) / len(steps) if steps else None,
+            total_steps=sum(steps),
+        )
 
 
 class TaskResult(BaseModel):
@@ -398,8 +483,15 @@ class TaskResult(BaseModel):
 
     attempts: list[AttemptSummary] = Field(default_factory=list)
 
+    # How many attempts were REQUESTED (K), not how many exist yet. The attempt list is
+    # pre-populated with placeholders, so these two agree by construction -- but the
+    # counters below deliberately only look at attempts that reached a terminal state.
     total_attempts: int = 0
-    # Attempts whose outcome was actually observed. ERRORED ones are excluded rather
+    completed: int = 0
+    running: int = 0
+    queued: int = 0
+
+    # Attempts whose outcome was actually observed. NOT_OBSERVED ones are excluded rather
     # than counted as failures -- see reward_for_status.
     valid_attempts: int = 0
     passed: int = 0
@@ -411,21 +503,28 @@ class TaskResult(BaseModel):
     # Per-attempt success rate over valid attempts only. None when nothing was observed.
     pass_rate: float | None = None
 
-    # True when errors ate some attempts, so pass@k rests on fewer samples than
-    # requested. Surfaced so a pass@3 computed on n=1 can't look clean.
-    low_confidence: bool = False
+    stats: RunStats = Field(default_factory=RunStats)
 
     def recompute(self, requested_attempts: int) -> None:
-        self.total_attempts = len(self.attempts)
-        self.passed = sum(1 for a in self.attempts if a.reward == 1)
-        self.failed = sum(1 for a in self.attempts if a.reward == 0)
-        self.errored = sum(1 for a in self.attempts if a.reward is None)
+        self.total_attempts = requested_attempts or len(self.attempts)
+        self.running = sum(
+            1 for a in self.attempts if a.status is AttemptStatus.IN_PROGRESS
+        )
+        self.queued = sum(1 for a in self.attempts if a.status is AttemptStatus.QUEUED)
+
+        # Only terminal attempts are scored. Counting a placeholder's `reward is None` as
+        # an error would report every unstarted attempt as an infrastructure failure.
+        done = [a for a in self.attempts if a.is_terminal]
+        self.completed = len(done)
+        self.passed = sum(1 for a in done if a.reward == 1)
+        self.failed = sum(1 for a in done if a.reward == 0)
+        self.errored = sum(1 for a in done if a.reward is None)
         self.valid_attempts = self.passed + self.failed
         self.pass_at_k = self.passed > 0
         self.pass_rate = (
             self.passed / self.valid_attempts if self.valid_attempts else None
         )
-        self.low_confidence = self.valid_attempts < requested_attempts
+        self.stats = RunStats.over(self.attempts)
 
 
 class JobResult(BaseModel):
@@ -443,6 +542,8 @@ class JobResult(BaseModel):
 
     total_attempts: int = 0
     completed_attempts: int = 0
+    running_attempts: int = 0
+    queued_attempts: int = 0
     valid_attempts: int = 0
     passed: int = 0
     failed: int = 0
@@ -453,6 +554,7 @@ class JobResult(BaseModel):
     # Mean reward over valid attempts only.
     mean_reward: float | None = None
 
+    stats: RunStats = Field(default_factory=RunStats)
     total_tokens: int = 0
     error: str | None = None
 
@@ -460,15 +562,18 @@ class JobResult(BaseModel):
         for task in self.tasks:
             task.recompute(self.spec.attempts_per_task)
 
+        every_attempt = [a for t in self.tasks for a in t.attempts]
         self.total_attempts = self.spec.total_attempts
-        self.completed_attempts = sum(t.total_attempts for t in self.tasks)
+        self.completed_attempts = sum(t.completed for t in self.tasks)
+        self.running_attempts = sum(t.running for t in self.tasks)
+        self.queued_attempts = sum(t.queued for t in self.tasks)
         self.passed = sum(t.passed for t in self.tasks)
         self.failed = sum(t.failed for t in self.tasks)
         self.errored = sum(t.errored for t in self.tasks)
         self.valid_attempts = self.passed + self.failed
-        self.total_tokens = sum(
-            a.total_tokens for t in self.tasks for a in t.attempts
-        )
+
+        self.stats = RunStats.over(every_attempt)
+        self.total_tokens = self.stats.total_tokens
 
         graded_tasks = [t for t in self.tasks if t.valid_attempts > 0]
         self.pass_at_k_rate = (
