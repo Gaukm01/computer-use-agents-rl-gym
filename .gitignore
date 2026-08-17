@@ -8,7 +8,9 @@ agent/.venv/
 __pycache__/
 *.py[cod]
 
-# Vendored reference clone (has its own git history)
+# Vendored reference clone (has its own git history).
+# Clone it with:
+#   cd agent && git clone --depth 1 https://github.com/google-gemini/computer-use-preview.git
 agent/computer-use-preview/
 
 # Verification artifacts / screenshots
@@ -17,16 +19,31 @@ agent/artifacts/
 # Auth cookie minted by rlgym/capture_auth.py — a live session, treat as a secret
 agent/storage_state.json
 
-# Rollout artifacts: trajectories, screenshots, videos
-runs/
+# Rollout artifacts. ONE complete job is committed as a browsable example, so results can be
+# reviewed without a Gemini key or Docker; everything else stays local.
+# `runs/*` not `runs/` — git cannot re-include anything inside an excluded directory.
+runs/*
+!runs/job-20260817-140645-64909b/
+# Session cookies — contain a secret, never commit.
+runs/**/storage_state.json
+
+# Task files uploaded through the console. The one the example job ran from is committed
+# so that job is self-describing; the rest are local scratch.
+uploads/*
+!uploads/task_half-20260817-140526.json
 
 # pytest
 .pytest_cache/
-uploads/
 
 # Frontend build output and deps
 web/node_modules/
 web/dist/
+web/tsconfig.tsbuildinfo
 
-# Think-aloud / brainstorming docs — deliberately not committed
 docs/
+
+# Editor / OS noise
+.DS_Store
+.claude/
+.idea/
+.vscode/
