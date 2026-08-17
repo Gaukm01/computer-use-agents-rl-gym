@@ -42,6 +42,12 @@ const TERMINAL_STATUSES = new Set([
 const isTerminal = (a: AttemptSummary) => TERMINAL_STATUSES.has(a.status);
 const hasStarted = (a: AttemptSummary) => a.attempt_id !== "";
 
+/** The executor writes ANSWERED *before* grading and the grader promotes it to
+ *  COMPLETED_CORRECT a moment later, so for a second or two a rollout that is about to pass
+ *  carries a failing status. `phase` is the field that knows: only DONE means graded.
+ *  Without this, a passing rollout briefly renders as "Failed". */
+const isGraded = (a: AttemptSummary) => isTerminal(a) && a.phase === "DONE";
+
 function seconds(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   if (value < 90) return `${value.toFixed(0)}s`;
@@ -50,14 +56,15 @@ function seconds(value: number | null | undefined): string {
 
 function chipClass(attempt: AttemptSummary): string {
   if (!hasStarted(attempt)) return "chip chip-idle";
+  if (!isGraded(attempt)) return "chip chip-running";
   if (attempt.status === "COMPLETED_CORRECT") return "chip chip-pass";
   if (attempt.status === "NOT_OBSERVED") return "chip chip-warn";
-  if (!isTerminal(attempt)) return "chip chip-running";
   return "chip chip-fail";
 }
 
 function chipLabel(attempt: AttemptSummary, jobEnded: boolean): string {
   if (!hasStarted(attempt)) return jobEnded ? "Not run" : "Queued";
+  if (!isGraded(attempt)) return attempt.phase === "GRADING" ? "Grading" : "Running";
   switch (attempt.status) {
     case "COMPLETED_CORRECT":
       return "Passed";
@@ -77,7 +84,7 @@ function chipLabel(attempt: AttemptSummary, jobEnded: boolean): string {
 
 /** Reward, exactly as the RL signal defines it: 1, 0, or null for an unobserved outcome. */
 function rewardText(attempt: AttemptSummary): string | null {
-  if (!isTerminal(attempt)) return null;
+  if (!isGraded(attempt)) return null;
   return attempt.reward === null ? "reward null" : `reward ${attempt.reward}`;
 }
 
@@ -199,7 +206,7 @@ function TaskCard({
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
 
-  const running = task.attempts.filter((a) => hasStarted(a) && !isTerminal(a));
+  const running = task.attempts.filter((a) => hasStarted(a) && !isGraded(a));
 
   return (
     <div className="task-card">
@@ -238,7 +245,7 @@ function TaskCard({
 
           <div className="chip-row" style={{ marginBottom: 10 }}>
             {task.attempts.map((attempt) => {
-              const openable = hasStarted(attempt) && isTerminal(attempt);
+              const openable = isGraded(attempt);
               return (
                 <button
                   key={`${task.task_id}-${attempt.attempt_index}`}
