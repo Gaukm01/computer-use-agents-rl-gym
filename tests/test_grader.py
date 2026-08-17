@@ -244,14 +244,71 @@ def test_no_answer_submitted_fails() -> None:
     assert "without calling submit_answer" in (result.diff or "")
 
 
-def test_unparseable_answer_reports_the_raw_text() -> None:
+def test_free_text_answer_is_judged_not_rejected() -> None:
+    """An answer that isn't JSON is still an answer.
+
+    It used to be failed for its ENCODING ("not valid JSON"), which conflated "wrong" with
+    "badly formatted" -- and the agent is no longer told what format to use, so the format
+    is not something it can get wrong. It is compared as the string it is and fails on the
+    merits.
+    """
     task = TASKS["problem1"]
     artifact = make_artifact(
-        "problem1", actual_output=None, actual_output_raw="here you go: {oops"
+        "problem1",
+        actual_output="here you go: {oops",
+        actual_output_raw="here you go: {oops",
     )
     result = grader.grade(artifact, task)
     assert result.verdict == "fail"
-    assert "not valid JSON" in (result.diff or "")
+    assert result.reward == 0
+
+
+def test_no_submission_is_still_distinguishable() -> None:
+    """Producing nothing must not read the same as producing something wrong."""
+    result = grader.grade(make_artifact("problem1"), TASKS["problem1"])
+    assert result.verdict == "fail"
+    assert "without calling submit_answer" in (result.diff or "")
+
+
+# ----------------------------------------------------------------------------------------
+# The submission envelope -- the agent wraps its answer, and is told nothing about shape
+# ----------------------------------------------------------------------------------------
+
+
+def test_wrapped_answer_is_unwrapped_before_comparison() -> None:
+    task = TASKS["problem10"]
+    wrapped = {"answer": task.expected_output()}
+    result = grader.grade(make_artifact("problem10", wrapped), task)
+    assert result.verdict == "pass", result.diff
+
+
+def test_unwrapped_answer_still_passes() -> None:
+    """The envelope is a fallback, not a requirement -- an agent that ignores it and
+    submits the bare object is not penalised for the wrapper it didn't use."""
+    task = TASKS["problem10"]
+    result = grader.grade(make_artifact("problem10", task.expected_output()), task)
+    assert result.verdict == "pass", result.diff
+
+
+def test_wrapped_wrong_answer_reports_the_real_mistake() -> None:
+    """The diff must describe the answer, not our wrapper. Reporting 'unexpected key:
+    answer' would send someone debugging the envelope instead of the value."""
+    task = TASKS["problem10"]
+    expected = task.expected_output()
+    wrong = {key: 999.9 for key in expected}
+    result = grader.grade(make_artifact("problem10", {"answer": wrong}), task)
+    assert result.verdict == "fail"
+    assert "answer" not in (result.diff or ""), result.diff
+
+
+def test_a_task_whose_answer_is_a_bare_string_grades() -> None:
+    """tasks.json normally double-encodes answers, but nothing requires it to. A task
+    answering `Q4` must be gradeable rather than crash the loader."""
+    task = Task(id="bare", task="which quarter?", answer="Q4")
+    assert task.expected_output() == "Q4"
+    assert grader.grade(make_artifact("bare", "Q4"), task).verdict == "pass"
+    assert grader.grade(make_artifact("bare", {"answer": "Q4"}), task).verdict == "pass"
+    assert grader.grade(make_artifact("bare", "Q3"), task).verdict == "fail"
 
 
 # ----------------------------------------------------------------------------------------

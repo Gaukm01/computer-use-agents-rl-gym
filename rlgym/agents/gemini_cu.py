@@ -49,17 +49,22 @@ from ..schemas import AgentConfig, StepRecord, StopReason, TokenUsage
 from .base import AgentRunResult
 
 SUBMIT_ANSWER = "submit_answer"
+ANSWER_KEY = "answer"
 
-# Appended to every task prompt. The agent has to be told the answer channel exists, and
-# that the episode ends when it uses it.
+# Appended to every task prompt. Describes the answer channel and nothing else.
+#
+# Deliberately free of task guidance. It does not restate the format the task asked for,
+# does not tell the agent to match a schema, and does not suggest guessing rather than
+# giving up -- working out what shape the answer should take is part of what is being
+# measured, so supplying it would be scoring our own scaffolding. All the agent is told is
+# the mechanism: which function, which argument, and that calling it ends the episode.
 SUBMIT_INSTRUCTION = f"""
 When you have determined the answer, call the `{SUBMIT_ANSWER}` function with a single
-argument `answer_json` containing ONLY a JSON object in exactly the format the task asked
-for. Do not wrap it in markdown fences or add commentary.
+argument `{ANSWER_KEY}` containing a JSON object of the form
+{{"{ANSWER_KEY}": <your answer>}}. The value may be an object, a list, a string or a
+number -- whichever represents the answer.
 
-Calling `{SUBMIT_ANSWER}` ends the task, so call it exactly once, and only after you have
-actually read the values off the screen. If you cannot determine the answer, submit your
-best attempt rather than stopping without submitting.
+Calling `{SUBMIT_ANSWER}` ends the task, so call it exactly once.
 """.strip()
 
 # Names carrying a screenshot payload, used when pruning old images from history.
@@ -81,13 +86,15 @@ MAX_CONSECUTIVE_MALFORMED = 3
 MALFORMED_ACTION_ERRORS = (KeyError, TypeError, ValueError, IndexError, AttributeError)
 
 # When this few steps remain, every observation carries an explicit instruction to submit.
+# Only ever consulted when AgentConfig.budget_reminders is on, which it is not by default.
 #
 # Motivated by an observed failure rather than invented: on problem10 the agent had the
 # correct value on screen at step 12, then spent the remaining 28 steps re-running queries
 # trying to decide whether Metabase's displayed 3.15 was rounded or exact -- and hit the step
 # cap without ever submitting. It had no way to know its budget was running out. Reporting
-# remaining budget is standard practice in agent harnesses; without it the model is being
-# asked to manage a resource it cannot observe.
+# remaining budget is common in agent harnesses, but it is help we would be supplying, and a
+# score earned with it is a score for the harness. Kept, off, and declared -- so it can be
+# ablated deliberately rather than baked into every number we report.
 SUBMIT_REMINDER_THRESHOLD = 8
 
 
@@ -95,21 +102,21 @@ def _submit_answer_declaration() -> types.FunctionDeclaration:
     return types.FunctionDeclaration(
         name=SUBMIT_ANSWER,
         description=(
-            "Submit the final answer for the task and end the episode. Provide the answer "
-            "as a JSON object string matching the format requested in the task."
+            "Submit the final answer for the task and end the episode."
         ),
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={
-                "answer_json": types.Schema(
+                ANSWER_KEY: types.Schema(
                     type=types.Type.STRING,
                     description=(
-                        "The final answer as a JSON object, e.g. "
-                        '{"product_titles": ["A", "B"], "ratings": [4.6, 5]}'
+                        # No example: an example is a format hint, and choosing the format
+                        # is part of the task.
+                        f'A JSON object of the form {{"{ANSWER_KEY}": <your answer>}}.'
                     ),
                 )
             },
-            required=["answer_json"],
+            required=[ANSWER_KEY],
         ),
     )
 
@@ -133,8 +140,8 @@ class GeminiComputerUseAgent(BrowserAgent):
 
         self._generate_content_config = types.GenerateContentConfig(
             temperature=config.temperature,
-            top_p=0.95,
-            top_k=40,
+            top_p=config.top_p,
+            top_k=config.top_k,
             max_output_tokens=8192,
             tools=[
                 types.Tool(
@@ -272,18 +279,22 @@ class GeminiComputerUseAgent(BrowserAgent):
 
                 # --- the answer channel: terminates the episode -----------------------
                 if call.name == SUBMIT_ANSWER:
-                    raw = args.get("answer_json")
+                    raw = args.get(ANSWER_KEY)
                     raw_text = raw if isinstance(raw, str) else json.dumps(raw)
+                    # Parsed leniently: a bare string that isn't JSON is kept as that
+                    # string rather than becoming None. Whether it MATCHES is the grader's
+                    # decision -- the loop's job is to record faithfully what was sent, and
+                    # a mismatch should read as a wrong answer, not as an unparseable one.
                     parsed: Any | None
                     try:
                         parsed = json.loads(raw_text)
                     except (TypeError, ValueError):
-                        parsed = None
+                        parsed = raw_text
                     steps.append(
                         StepRecord(
                             index=len(steps),
                             action_name=SUBMIT_ANSWER,
-                            action_args={"answer_json": raw_text},
+                            action_args={ANSWER_KEY: raw_text},
                             reasoning=reasoning,
                             latency_ms=latency_ms,
                             tokens=turn_tokens,
@@ -356,18 +367,21 @@ class GeminiComputerUseAgent(BrowserAgent):
                     (screenshot_dir / name).write_bytes(result.screenshot)
                     screenshot_rel = f"{screenshot_dir.name}/{name}"
 
-                    remaining = max_steps - len(steps) - 1
-                    payload = {
-                        "url": result.url,
-                        "steps_remaining": remaining,
-                        **extra_fields,
-                    }
-                    if remaining <= SUBMIT_REMINDER_THRESHOLD:
-                        payload["reminder"] = (
-                            f"Only {max(remaining, 0)} step(s) remain before this attempt is "
-                            f"cut off and scored zero. Call {SUBMIT_ANSWER} now with your "
-                            "best answer, even if you are not fully certain of it."
-                        )
+                    payload = {"url": result.url, **extra_fields}
+
+                    # Budget reporting is opt-in and off by default -- see
+                    # AgentConfig.budget_reminders. When off the agent sees only the page
+                    # it is looking at, so managing its own step budget is part of the
+                    # task rather than something we hand it.
+                    if self._config.budget_reminders:
+                        remaining = max_steps - len(steps) - 1
+                        payload["steps_remaining"] = remaining
+                        if remaining <= SUBMIT_REMINDER_THRESHOLD:
+                            payload["reminder"] = (
+                                f"Only {max(remaining, 0)} step(s) remain before this attempt "
+                                f"is cut off and scored zero. Call {SUBMIT_ANSWER} now with "
+                                "your best answer, even if you are not fully certain of it."
+                            )
                     if refused:
                         # Hand the refusal back as an observation so the model can adapt
                         # rather than silently repeating a no-op.

@@ -18,6 +18,11 @@ Three comparison problems this has to solve, all of them real in tasks.json:
    the right ratings but pairs them wrongly. Equal-length list values are therefore zipped
    into tuples and the tuples compared, which keeps each value bound to its label. It also
    makes `problem2`'s ranking survive implicitly, since each count travels with its title.
+
+4. **The submission envelope.** The agent submits `{"answer": <value>}` and is told nothing
+   about what shape `<value>` should be -- working that out is part of the task. So the
+   wrapper is stripped as a fallback before the answer is judged. Tolerance is confined to
+   how the answer arrives; whether it is *right* stays strict.
 """
 
 from __future__ import annotations
@@ -33,7 +38,21 @@ from pydantic import BaseModel
 from . import schemas
 from .schemas import AttemptArtifact, AttemptStatus, EvaluationResult, Task
 
-EVALUATOR_VERSION = "1.0.0"
+EVALUATOR_VERSION = "1.1.0"
+
+# The agent is asked to submit `{"answer": <value>}` and is told nothing about what shape
+# <value> should take -- deciding that is part of the task. So the envelope has to come off
+# before comparison. It is tried as a FALLBACK rather than unconditionally, because a task
+# whose expected answer genuinely has a single "answer" key would otherwise be unmatchable.
+ANSWER_ENVELOPE_KEY = "answer"
+_NOT_WRAPPED = object()
+
+
+def _unwrap_envelope(actual: Any) -> Any:
+    """The value inside `{"answer": ...}`, or _NOT_WRAPPED if that isn't the shape."""
+    if isinstance(actual, dict) and list(actual) == [ANSWER_ENVELOPE_KEY]:
+        return actual[ANSWER_ENVELOPE_KEY]
+    return _NOT_WRAPPED
 
 REL_TOL = 1e-6
 ABS_TOL = 1e-2
@@ -296,19 +315,25 @@ def grade(artifact: AttemptArtifact, task: Task) -> EvaluationResult:
             "fail", reward, diff=f"not graded -- status {artifact.status.value}"
         )
 
-    if artifact.actual_output is None:
-        if artifact.actual_output_raw:
-            return result(
-                "fail",
-                0,
-                diff="submitted answer was not valid JSON: "
-                f"{artifact.actual_output_raw[:200]!r}",
-            )
+    if artifact.actual_output is None and artifact.actual_output_raw is None:
         return result(
             "fail", 0, diff="agent finished without calling submit_answer"
         )
 
+    # An answer that isn't JSON is still an answer -- it is compared as the string it is,
+    # and fails on the merits rather than on its encoding.
     outcome = compare_outputs(expected, artifact.actual_output)
     if outcome.matched:
         return result("pass", 1)
+
+    unwrapped = _unwrap_envelope(artifact.actual_output)
+    if unwrapped is not _NOT_WRAPPED:
+        inner = compare_outputs(expected, unwrapped)
+        if inner.matched:
+            return result("pass", 1)
+        # Report the unwrapped diff: the agent followed the envelope convention, so
+        # "missing key avg_rating, unexpected key answer" would describe our wrapper
+        # rather than the mistake it actually made.
+        outcome = inner
+
     return result("fail", 0, diff=outcome.diff, near_miss=outcome.near_miss)

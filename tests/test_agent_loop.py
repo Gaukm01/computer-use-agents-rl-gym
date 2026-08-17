@@ -15,7 +15,12 @@ from types import SimpleNamespace
 import pytest
 from google.genai import types
 
-from rlgym.agents.gemini_cu import SUBMIT_ANSWER, GeminiComputerUseAgent
+from rlgym.agents.gemini_cu import (
+    ANSWER_KEY,
+    SUBMIT_ANSWER,
+    SUBMIT_INSTRUCTION,
+    GeminiComputerUseAgent,
+)
 from rlgym.computer import ActionRefused
 from rlgym.schemas import AgentConfig, StopReason
 
@@ -30,7 +35,6 @@ class FakeComputer:
 
     def __init__(self, refuse: set[str] | None = None) -> None:
         self.refuse = refuse or set()
-        self.used_sql_editor = False
         self.refusals: list[str] = []
 
     def check_action_allowed(self, name: str) -> None:
@@ -53,8 +57,25 @@ def model_turn(name: str, args: dict, text: str | None = "thinking") -> SimpleNa
     return SimpleNamespace(candidates=[candidate], prompt_feedback=None, usage_metadata=None)
 
 
-def run_with(monkeypatch, tmp_path, turns: list[SimpleNamespace], computer=None, max_steps=10):
-    agent = GeminiComputerUseAgent(AgentConfig(), api_key="not-used")
+def build_agent(config: AgentConfig | None = None) -> GeminiComputerUseAgent:
+    return GeminiComputerUseAgent(config or AgentConfig(), api_key="not-used")
+
+
+def payloads_from(agent: GeminiComputerUseAgent) -> list[dict]:
+    """What the harness handed back to the model as observations."""
+    return [
+        dict(part.function_response.response or {})
+        for content in agent._contents
+        if content.role == "user" and content.parts
+        for part in content.parts
+        if part.function_response
+    ]
+
+
+def run_with(
+    monkeypatch, tmp_path, turns: list[SimpleNamespace], computer=None, max_steps=10, agent=None
+):
+    agent = agent or build_agent()
     queue = list(turns)
     monkeypatch.setattr(agent, "get_model_response", lambda *a, **k: queue.pop(0))
     return agent.run(
@@ -77,7 +98,7 @@ def test_malformed_call_does_not_end_the_attempt(monkeypatch, tmp_path) -> None:
         tmp_path,
         [
             model_turn("drag_and_drop", {"destination_x": 500, "destination_y": 500}),
-            model_turn(SUBMIT_ANSWER, {"answer_json": '{"avg_rating": 3.15}'}),
+            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: '{"avg_rating": 3.15}'}),
         ],
     )
 
@@ -102,7 +123,7 @@ def test_error_text_is_the_raw_exception_with_no_guidance(monkeypatch, tmp_path)
         tmp_path,
         [
             model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2}),
-            model_turn(SUBMIT_ANSWER, {"answer_json": "{}"}),
+            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"}),
         ],
     )
     message = result.steps[0].action_error
@@ -140,7 +161,7 @@ def test_refusal_and_malformed_call_are_recorded_differently(monkeypatch, tmp_pa
         [
             model_turn("scroll", {"x": 1, "y": 2, "direction": "down"}),
             model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2}),
-            model_turn(SUBMIT_ANSWER, {"answer_json": "{}"}),
+            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"}),
         ],
         computer=computer,
     )
@@ -173,7 +194,86 @@ def test_a_valid_call_is_unaffected(monkeypatch, tmp_path) -> None:
     result = run_with(
         monkeypatch,
         tmp_path,
-        [model_turn(SUBMIT_ANSWER, {"answer_json": '{"x": 1}'})],
+        [model_turn(SUBMIT_ANSWER, {ANSWER_KEY: '{"x": 1}'})],
     )
     assert result.stop_reason is StopReason.SUBMITTED
     assert result.submitted_answer == {"x": 1}
+
+
+# ----------------------------------------------------------------------------------------
+# What we hand the agent, and what we deliberately do not
+# ----------------------------------------------------------------------------------------
+
+
+def test_step_budget_is_not_reported_by_default(monkeypatch, tmp_path) -> None:
+    """Telling the agent how much budget is left is scaffolding WE supply, so a score
+    earned with it is partly ours. It stays available and off -- see
+    AgentConfig.budget_reminders -- so it can be ablated deliberately rather than being
+    baked silently into every number we report."""
+    agent = build_agent()
+    run_with(
+        monkeypatch,
+        tmp_path,
+        [
+            model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2}),
+            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"}),
+        ],
+        agent=agent,
+        max_steps=2,
+    )
+
+    observations = payloads_from(agent)
+    assert observations, "the agent saw no observations at all"
+    for payload in observations:
+        assert "steps_remaining" not in payload
+        assert "reminder" not in payload
+
+
+def test_step_budget_is_reported_when_explicitly_enabled(monkeypatch, tmp_path) -> None:
+    """The knob still works -- it is off, not deleted."""
+    agent = build_agent(AgentConfig(budget_reminders=True))
+    run_with(
+        monkeypatch,
+        tmp_path,
+        [
+            model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2}),
+            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"}),
+        ],
+        agent=agent,
+        max_steps=2,
+    )
+
+    first = payloads_from(agent)[0]
+    assert first["steps_remaining"] == 1
+    assert "reminder" in first
+
+
+def test_submit_instruction_carries_no_task_guidance() -> None:
+    """The agent is told the mechanism and nothing else. Restating the task's answer
+    format, or suggesting it guess rather than give up, would be us doing part of the
+    task."""
+    text = SUBMIT_INSTRUCTION.lower()
+    for coaching in ("format", "best", "markdown", "commentary", "off the screen"):
+        assert coaching not in text, f"leaked guidance: {coaching!r}"
+
+
+def test_a_non_json_answer_survives_as_itself(monkeypatch, tmp_path) -> None:
+    """The agent picks the answer's shape, so a bare string is a legitimate submission.
+    It must reach the grader as that string rather than being nulled out for its
+    encoding -- 'wrong' and 'badly formatted' are different verdicts."""
+    result = run_with(
+        monkeypatch, tmp_path, [model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "Q4"})]
+    )
+    assert result.stop_reason is StopReason.SUBMITTED
+    assert result.submitted_answer == "Q4"
+    assert result.submitted_answer_raw == "Q4"
+
+
+def test_the_answer_envelope_reaches_the_grader_intact(monkeypatch, tmp_path) -> None:
+    """The loop records what was sent; unwrapping is the grader's business."""
+    result = run_with(
+        monkeypatch,
+        tmp_path,
+        [model_turn(SUBMIT_ANSWER, {ANSWER_KEY: '{"answer": {"avg_rating": 3.15}}'})],
+    )
+    assert result.submitted_answer == {"answer": {"avg_rating": 3.15}}
