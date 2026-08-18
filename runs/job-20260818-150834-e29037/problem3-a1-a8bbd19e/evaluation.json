@@ -1,0 +1,20 @@
+{
+  "attempt_id": "problem3-a1-a8bbd19e",
+  "task_id": "problem3",
+  "expected_output": {
+    "price": 19.87,
+    "product": "Rustic Paper Car",
+    "category": "Doohickey"
+  },
+  "actual_output": {
+    "product": "Rustic Paper Car",
+    "category": "Doohickey",
+    "price": 19.87
+  },
+  "verdict": "pass",
+  "reward": 1,
+  "diff": null,
+  "near_miss": false,
+  "evaluated_at": "2026-08-18T15:20:52.605060Z",
+  "evaluator_version": "1.1.0"
+}

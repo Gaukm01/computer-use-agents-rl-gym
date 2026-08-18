@@ -1,0 +1,22 @@
+{
+  "attempt_id": "problem2-a1-5257e5bd",
+  "task_id": "problem2",
+  "expected_output": {
+    "Gizmo": "Small Marble Knife",
+    "Gadget": "Incredible Aluminum Knife",
+    "Widget": "Awesome Steel Toucan",
+    "Doohickey": "Aerodynamic Linen Coat"
+  },
+  "actual_output": {
+    "Doohickey": "Aerodynamic Linen Coat",
+    "Gadget": "Incredible Aluminum Knife",
+    "Gizmo": "Small Marble Knife",
+    "Widget": "Awesome Steel Toucan"
+  },
+  "verdict": "pass",
+  "reward": 1,
+  "diff": null,
+  "near_miss": false,
+  "evaluated_at": "2026-08-18T15:15:53.272474Z",
+  "evaluator_version": "1.1.0"
+}

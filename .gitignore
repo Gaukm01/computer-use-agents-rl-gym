@@ -24,6 +24,7 @@ agent/storage_state.json
 # `runs/*` not `runs/` — git cannot re-include anything inside an excluded directory.
 runs/*
 !runs/job-20260817-140645-64909b/
+!runs/job-20260818-150834-e29037/
 # Session cookies — contain a secret, never commit.
 runs/**/storage_state.json
 
@@ -34,6 +35,7 @@ older_runs/
 # so that job is self-describing; the rest are local scratch.
 uploads/*
 !uploads/task_half-20260817-140526.json
+!uploads/task_example-20260818-150611.json
 
 # pytest
 .pytest_cache/

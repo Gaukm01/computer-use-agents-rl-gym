@@ -1,0 +1,35 @@
+{
+  "attempt_id": "problem5-a1-66afab6f",
+  "job_id": "job-20260818-150834-e29037",
+  "attempt_index": 1,
+  "task": {
+    "id": "problem5",
+    "task": "Calculate the average rating for products in the 'Widget' category. Return in the format {avg_rating: number}.",
+    "answer": "{\n  \"avg_rating\": 3.15\n}",
+    "max_steps": null,
+    "timeout_s": null
+  },
+  "agent_config": {
+    "agent_type": "gemini_computer_use",
+    "model": "gemini-3.6-flash",
+    "hint": null,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 40,
+    "budget_reminders": true,
+    "prohibited_actions": []
+  },
+  "limits": {
+    "max_steps": 80,
+    "timeout_s": 900
+  },
+  "out_dir": "/Users/gkumar/assessments/hackathon/runs/job-20260818-150834-e29037/problem5-a1-66afab6f",
+  "gym_url": "http://localhost:3001",
+  "storage_state": "/Users/gkumar/assessments/hackathon/runs/job-20260818-150834-e29037/problem5-a1-66afab6f/storage_state.json",
+  "headless": true,
+  "record_video": true,
+  "pristine_counts": {
+    "recent_views": 73,
+    "report_card": 86
+  }
+}

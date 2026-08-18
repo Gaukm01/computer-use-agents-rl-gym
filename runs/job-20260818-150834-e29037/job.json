@@ -1,0 +1,380 @@
+{
+  "spec": {
+    "job_id": "job-20260818-150834-e29037",
+    "task_ids": [
+      "problem1",
+      "problem2",
+      "problem3",
+      "problem4",
+      "problem5"
+    ],
+    "tasks_file": "/Users/gkumar/assessments/hackathon/uploads/task_example-20260818-150611.json",
+    "attempts_per_task": 2,
+    "concurrency": 3,
+    "agent_config": {
+      "agent_type": "gemini_computer_use",
+      "model": "gemini-3.6-flash",
+      "hint": null,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 40,
+      "budget_reminders": true,
+      "prohibited_actions": []
+    },
+    "limits": {
+      "max_steps": 80,
+      "timeout_s": 900
+    },
+    "headless": true,
+    "record_video": true,
+    "created_at": "2026-08-18T15:08:34.252750Z"
+  },
+  "status": "COMPLETED",
+  "started_at": "2026-08-18T15:08:34.253189Z",
+  "ended_at": "2026-08-18T15:33:51.802578Z",
+  "duration_s": 1517.549389,
+  "tasks": [
+    {
+      "task_id": "problem1",
+      "prompt": "Retrieve product titles and ratings for products with ratings above '4.5' and price less than '40'. Return in the format {product_titles: list[str], ratings: list[number]}.",
+      "expected_output": {
+        "ratings": [
+          4.6,
+          5,
+          5
+        ],
+        "product_titles": [
+          "Rustic Paper Wallet",
+          "Ergonomic Wool Bag",
+          "Lightweight Linen Hat"
+        ]
+      },
+      "attempts": [
+        {
+          "attempt_id": "problem1-a0-7ca35d64",
+          "task_id": "problem1",
+          "attempt_index": 0,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 21,
+          "duration_s": 169.053176,
+          "total_tokens": 149030,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 20
+        },
+        {
+          "attempt_id": "problem1-a1-1afeafbb",
+          "task_id": "problem1",
+          "attempt_index": 1,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 24,
+          "duration_s": 203.934164,
+          "total_tokens": 208005,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 23
+        }
+      ],
+      "total_attempts": 2,
+      "completed": 2,
+      "running": 0,
+      "queued": 0,
+      "valid_attempts": 2,
+      "passed": 2,
+      "failed": 0,
+      "errored": 0,
+      "pass_at_k": true,
+      "pass_rate": 1.0,
+      "stats": {
+        "observed_attempts": 2,
+        "total_tokens": 357035,
+        "total_duration_s": 372.98734,
+        "avg_duration_s": 186.49367,
+        "avg_steps": 22.5,
+        "total_steps": 45
+      }
+    },
+    {
+      "task_id": "problem2",
+      "prompt": "Identify the most expensive product in each category ('Doohickey', 'Gadget', 'Gizmo', 'Widget'). Return in the format {Doohickey: str, Gadget: str, Gizmo: str, Widget: str}",
+      "expected_output": {
+        "Gizmo": "Small Marble Knife",
+        "Gadget": "Incredible Aluminum Knife",
+        "Widget": "Awesome Steel Toucan",
+        "Doohickey": "Aerodynamic Linen Coat"
+      },
+      "attempts": [
+        {
+          "attempt_id": "problem2-a0-2a70ca38",
+          "task_id": "problem2",
+          "attempt_index": 0,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 46,
+          "duration_s": 371.919002,
+          "total_tokens": 729169,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 45
+        },
+        {
+          "attempt_id": "problem2-a1-5257e5bd",
+          "task_id": "problem2",
+          "attempt_index": 1,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 20,
+          "duration_s": 155.386287,
+          "total_tokens": 159870,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 19
+        }
+      ],
+      "total_attempts": 2,
+      "completed": 2,
+      "running": 0,
+      "queued": 0,
+      "valid_attempts": 2,
+      "passed": 2,
+      "failed": 0,
+      "errored": 0,
+      "pass_at_k": true,
+      "pass_rate": 1.0,
+      "stats": {
+        "observed_attempts": 2,
+        "total_tokens": 889039,
+        "total_duration_s": 527.305289,
+        "avg_duration_s": 263.6526445,
+        "avg_steps": 33.0,
+        "total_steps": 66
+      }
+    },
+    {
+      "task_id": "problem3",
+      "prompt": "Retrieve the name, category, and price of the product that has been ordered exactly 100 times and has the lowest price. Return in the format {product: str, category: str, price: number}.",
+      "expected_output": {
+        "price": 19.87,
+        "product": "Rustic Paper Car",
+        "category": "Doohickey"
+      },
+      "attempts": [
+        {
+          "attempt_id": "problem3-a0-48ef9199",
+          "task_id": "problem3",
+          "attempt_index": 0,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 13,
+          "duration_s": 99.281702,
+          "total_tokens": 77977,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 12
+        },
+        {
+          "attempt_id": "problem3-a1-a8bbd19e",
+          "task_id": "problem3",
+          "attempt_index": 1,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 30,
+          "duration_s": 288.896533,
+          "total_tokens": 362034,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 29
+        }
+      ],
+      "total_attempts": 2,
+      "completed": 2,
+      "running": 0,
+      "queued": 0,
+      "valid_attempts": 2,
+      "passed": 2,
+      "failed": 0,
+      "errored": 0,
+      "pass_at_k": true,
+      "pass_rate": 1.0,
+      "stats": {
+        "observed_attempts": 2,
+        "total_tokens": 440011,
+        "total_duration_s": 388.178235,
+        "avg_duration_s": 194.0891175,
+        "avg_steps": 21.5,
+        "total_steps": 43
+      }
+    },
+    {
+      "task_id": "problem4",
+      "prompt": "Retrieve the first name, last name, and email of the account with the highest total invoice payment amount. Return in the format {first_name: str, last_name: str, email: str, sum: number}.",
+      "expected_output": {
+        "sum": 101203.3,
+        "email": "oda.yost@hotmail.example",
+        "last_name": "Yost",
+        "first_name": "Oda"
+      },
+      "attempts": [
+        {
+          "attempt_id": "problem4-a0-f1a510ae",
+          "task_id": "problem4",
+          "attempt_index": 0,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 66,
+          "duration_s": 566.833721,
+          "total_tokens": 1598966,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 65
+        },
+        {
+          "attempt_id": "problem4-a1-2f3b7aac",
+          "task_id": "problem4",
+          "attempt_index": 1,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 69,
+          "duration_s": 580.337724,
+          "total_tokens": 1646061,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 68
+        }
+      ],
+      "total_attempts": 2,
+      "completed": 2,
+      "running": 0,
+      "queued": 0,
+      "valid_attempts": 2,
+      "passed": 2,
+      "failed": 0,
+      "errored": 0,
+      "pass_at_k": true,
+      "pass_rate": 1.0,
+      "stats": {
+        "observed_attempts": 2,
+        "total_tokens": 3245027,
+        "total_duration_s": 1147.171445,
+        "avg_duration_s": 573.5857225,
+        "avg_steps": 67.5,
+        "total_steps": 135
+      }
+    },
+    {
+      "task_id": "problem5",
+      "prompt": "Calculate the average rating for products in the 'Widget' category. Return in the format {avg_rating: number}.",
+      "expected_output": {
+        "avg_rating": 3.15
+      },
+      "attempts": [
+        {
+          "attempt_id": "problem5-a0-989b4827",
+          "task_id": "problem5",
+          "attempt_index": 0,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 53,
+          "duration_s": 446.221704,
+          "total_tokens": 964352,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 52
+        },
+        {
+          "attempt_id": "problem5-a1-66afab6f",
+          "task_id": "problem5",
+          "attempt_index": 1,
+          "status": "COMPLETED_CORRECT",
+          "phase": "DONE",
+          "reward": 1,
+          "verdict": "pass",
+          "near_miss": false,
+          "step_count": 52,
+          "duration_s": 429.063296,
+          "total_tokens": 870847,
+          "error": null,
+          "diff": null,
+          "has_video": true,
+          "screenshot_count": 51
+        }
+      ],
+      "total_attempts": 2,
+      "completed": 2,
+      "running": 0,
+      "queued": 0,
+      "valid_attempts": 2,
+      "passed": 2,
+      "failed": 0,
+      "errored": 0,
+      "pass_at_k": true,
+      "pass_rate": 1.0,
+      "stats": {
+        "observed_attempts": 2,
+        "total_tokens": 1835199,
+        "total_duration_s": 875.285,
+        "avg_duration_s": 437.6425,
+        "avg_steps": 52.5,
+        "total_steps": 105
+      }
+    }
+  ],
+  "total_attempts": 10,
+  "completed_attempts": 10,
+  "running_attempts": 0,
+  "queued_attempts": 0,
+  "valid_attempts": 10,
+  "passed": 10,
+  "failed": 0,
+  "errored": 0,
+  "pass_at_k_rate": 1.0,
+  "mean_reward": 1.0,
+  "stats": {
+    "observed_attempts": 10,
+    "total_tokens": 6766311,
+    "total_duration_s": 3310.9273089999997,
+    "avg_duration_s": 331.0927309,
+    "avg_steps": 39.4,
+    "total_steps": 394
+  },
+  "total_tokens": 6766311,
+  "error": null
+}
