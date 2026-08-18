@@ -38,7 +38,7 @@ Productionisation plan: [`PRODUCTION.md`](./PRODUCTION.md)
 - **Health gate** — Docker, both images, the dump, and credentials checked before a run.
 - *Also:* tasks.json upload + validation, per-rollout `spec.json`, `worker.log` capture,
   path-traversal guard on media, legacy-status translation, server-served agent defaults,
-  hash routing, 109 tests.
+  hash routing, 111 tests.
 
 ---
 
@@ -390,53 +390,72 @@ Two different questions, and they need different evidence: **is the platform cor
 
 ## 4.1 Is the platform correct?
 
-Not one successful run — every check below is recorded *per rollout* and holds across **65
-rollouts in two independent jobs**. The gym, orchestration, executor and grader are unchanged
-since those runs, so these results describe the current platform.
+Not one successful run — every check below is recorded *per rollout* and holds across the **55
+rollouts of the two jobs in §4.2**, on current code.
 
 | Check | Evidence | Result |
 |---|---|---|
-| Every rollout starts from identical state | `pristine_counts` on each artifact | **65/65** identical: `{recent_views: 73, report_card: 86}` |
+| Every rollout starts from identical state | `pristine_counts` on each artifact | **55/55** identical: `{recent_views: 73, report_card: 86}` |
 | Isolation holds; nothing leaks | `teardown_error`, `trim_error` per rollout | **0 and 0** |
-| No port collision under concurrency | `gym_url` per rollout | 3001 ×21 · 3002 ×22 · 3003 ×22 |
+| No port collision under concurrency | `gym_url` per rollout | 3001 ×19 · 3002 ×19 · 3003 ×17 |
 | Parallelism is real, not nominal | wall clock vs serial estimate | **2.9×** on 3 lanes — *in both jobs independently* |
-| The grader discriminates both ways | verdicts + diffs | 52 pass / 13 fail, **4 distinct** failure reasons |
+| The grader discriminates both ways | verdicts + diffs | 43 pass / 11 fail / 1 not graded, **3 distinct** failure reasons |
 | The gym reproduces the provided ground truth | independent SQL check | **9 of 10** answers reproduce exactly |
-| Reward survives infrastructure failure | the two disk-exhaustion jobs | 25/30 graded and valid; 5 correctly `null` |
+| Reward survives infrastructure failure | the earlier disk-exhaustion jobs | 25/30 graded and valid; 5 correctly `null` |
 
 Two of those deserve a sentence:
 
-- **The grader is not rubber-stamping.** `problem1`/`3`/`4` at 10/10 are the positive control,
-  `problem2` at 0/10 for a diagnosable reason is the negative control, and `problem5` at 8/10
-  shows the harness captures genuine sampling variance rather than being deterministic by
-  accident. Failures come back with legible diffs, not a bare `false`.
+- **The grader is not rubber-stamping.** Seven tasks at 5/5 are the positive control, `problem2`
+  at 0/9 for a diagnosable reason is the negative control, and `problem9`/`problem10` at 4/5 show
+  the harness captures genuine sampling variance rather than being deterministic by accident.
+  Failures come back with legible diffs, not a bare `false`.
 - **2.9× is close to the 3.0× ceiling**, and it landed twice on different job shapes — so the
   bound really is the port queue, not contention we failed to notice.
 
 ## 4.2 What the agent scored
 
-Pass rates measure the agent, not the platform, and they move with the prompt. The task preamble
-and the near-cap reminder have been reworded since these runs, so treat the numbers as a
-snapshot of that policy rather than a current benchmark.
+Pass rates measure the agent, not the platform. Both runs below are on current code — same
+preamble, same near-cap reminder, same limits.
 
-**5 tasks × 10, concurrency 3 — 50 rollouts, 91 min, 21.8 M tokens**
+### The task set, minus `problem2`
 
-| Task | pass@10 | Passed | Avg time | Avg steps |
+**9 tasks × 5 attempts, concurrency 3 — 45 rollouts, 90 min, 25.2 M tokens**
+`60` step cap · `900` s wall clock · temperature `1.0`
+
+| Task | pass@5 | Passed | Avg time | Avg steps |
 |---|---|---|---|---|
-| problem1 | yes | 10/10 | 241 s | 28 |
-| problem3 | yes | 10/10 | 241 s | 31 |
-| problem4 | yes | 10/10 | 215 s | 25 |
-| problem5 | yes | 8/10 | 295 s | 34 |
-| problem2 | **no** | **0/10** | 436 s | 49 |
+| problem1 | yes | 5/5 | 208 s | 26 |
+| problem3 | yes | 5/5 | 186 s | 23 |
+| problem4 | yes | 5/5 | 221 s | 27 |
+| problem5 | yes | 5/5 | 286 s | 33 |
+| problem6 | yes | 5/5 | 479 s | 56 |
+| problem7 | yes | 5/5 | 243 s | 30 |
+| problem8 | yes | 5/5 | 413 s | 49 |
+| problem9 | yes | 4/5 | 379 s | 42 |
+| problem10 | yes | 4/5 | 455 s | 52 |
 
-pass@10 **80%** · mean reward **0.76** · **0 not-observed**
+**pass@5 on every task · mean reward 0.96 · 43 of 45 rollouts correct · 0 not-observed**
 
-**5 tasks × 3 — 15 rollouts, 27 min, 7.1 M tokens.** pass@3 **100%** of tasks · mean reward
-**0.93** · **0 not-observed.** This is the job committed under `runs/`, browsable without an
-API key.
+Both misses are `MAX_STEPS_EXCEEDED`, not wrong answers — the agent ran out of budget mid-work
+rather than submitting something incorrect. `problem6`, `problem8` and `problem10` are the
+expensive tasks (49–56 steps average), which is where a step cap bites first.
 
-**Cost anatomy:** ~450 k tokens per rollout at prompt:output ≈ **380:1** — three 1440×900 PNGs
-retained per turn, ~13 k prompt tokens per step. Entirely a screenshot problem.
+### `problem2`, run on its own
+
+**10 attempts — 32 min, 13.2 M tokens**
+`80` step cap · temperature `1.2` — both raised deliberately, to give it every chance
+
+**0 of 9 graded attempts passed · 1 not observed · 514 s and 64 steps average**
+
+It burns ~1.3 M tokens per rollout, roughly double anything else, because it never converges —
+the agent keeps re-deriving a number that cannot be reached from this data. §4.3 explains why.
+
+**Cost anatomy:** ~560 k tokens per rollout on the 9-task run, at prompt:output ≈ **521:1** —
+three 1440×900 PNGs retained per turn, ~15 k prompt tokens per step. Entirely a screenshot
+problem.
+
+*A smaller 15-rollout job (5 tasks × 3) is committed under `runs/` with its screenshots and
+video, so transcripts can be browsed without an API key.*
 
 ## 4.3 The one negative result worth stating
 

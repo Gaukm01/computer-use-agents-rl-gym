@@ -27,6 +27,9 @@ runs/*
 # Session cookies — contain a secret, never commit.
 runs/**/storage_state.json
 
+# Scratch / superseded runs, moved out of runs/ so the console only lists real ones.
+older_runs/
+
 # Task files uploaded through the console. The one the example job ran from is committed
 # so that job is self-describing; the rest are local scratch.
 uploads/*

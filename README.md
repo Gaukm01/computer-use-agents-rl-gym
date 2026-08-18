@@ -180,7 +180,7 @@ manual dev gym · `5173` Vite dev server.
 ## Verify the install
 
 ```bash
-agent/.venv/bin/python -m pytest tests -q       # expect: 109 passed, 7 skipped
+agent/.venv/bin/python -m pytest tests -q       # expect: 111 passed, 7 skipped
 curl -s localhost:8000/api/health               # expect: every flag true, detail null
 ```
 
@@ -224,13 +224,13 @@ agent/.venv/bin/python -m rlgym.gym_stack --port 3000 --keep     # Ctrl-C tears 
 
 ### What a run costs
 
-A rollout averages **~285 s** and **~450k tokens** (prompt:output ≈ 380:1 — screenshots
-dominate completely). Budget accordingly:
+A rollout averages **~320 s** and **~560k tokens** (prompt:output ≈ 520:1 — screenshots
+dominate completely), and both scale with the step cap. Budget accordingly:
 
 | Job | Rollouts | Wall clock @ concurrency 3 | Tokens |
 |---|---|---|---|
-| 5 tasks x 3 | 15 | ~27 min | ~7.1 M |
-| 5 tasks x 10 | 50 | ~91 min | ~21.8 M |
+| 9 tasks × 5, 60-step cap | 45 | ~90 min | ~25 M |
+| 1 task × 10, 80-step cap | 10 | ~32 min | ~13 M |
 
 Jobs are designed to run **one at a time** — starting a job sweeps orphaned rollout
 containers, so a second concurrent job would remove the first job's gyms.
@@ -290,6 +290,6 @@ server/app.py           FastAPI: thin routes over service.py, and serves web/dis
 web/src/                React console: NewRun, JobView, Transcript
 metabase/               docker-compose.yml for one ephemeral gym
 resources/              tasks.json, metabase_envdata.sql
-tests/                  109 tests, no Docker required
+tests/                  111 tests, no Docker required
 runs/                   rollout artifacts (git-ignored)
 ```
