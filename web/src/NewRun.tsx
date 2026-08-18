@@ -171,17 +171,20 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
   }
 
   const k = parsePositive(attempts, 1);
-  const lanes = Math.min(
-    parsePositive(concurrency, 1),
-    defaults?.max_gyms ?? 3,
-  );
+  const lanes = defaults
+    ? Math.min(parsePositive(concurrency, 1), defaults.max_gyms)
+    : parsePositive(concurrency, 1);
   const totalAttempts = selected.size * k;
-  const capSeconds = defaults?.timeout_s ?? 600;
-  // Each attempt boots its own Postgres + Metabase before the agent starts; measured at
-  // ~35s. The cap applies to agent time only, so the worst case per attempt is cap + boot.
-  const worstCaseMinutes = Math.ceil(
-    (Math.ceil(totalAttempts / Math.max(lanes, 1)) * (capSeconds + 35)) / 60,
-  );
+  // No local fallbacks for anything the harness owns. A hardcoded `?? 600` silently
+  // survived the timeout moving to 900 and the form kept quoting the old number, which is
+  // the drift /api/agent-defaults exists to prevent. Until it loads, show nothing.
+  const capSeconds = defaults?.timeout_s ?? null;
+  // Each attempt boots its own Postgres + Metabase before the agent starts; measured ~35s.
+  // The cap covers agent time only, so the worst case per attempt is cap + boot.
+  const worstCaseMinutes =
+    capSeconds === null
+      ? null
+      : Math.ceil((Math.ceil(totalAttempts / Math.max(lanes, 1)) * (capSeconds + 35)) / 60);
 
   /** Starting a job runs gym_stack.sweep(), which removes EVERY ephemeral container -- so a
    *  second job destroys the first one's gyms mid-rollout. The platform is built to run one
@@ -198,6 +201,7 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
       }
     }
     setConfirmKill(null);
+    if (!defaults) return;   // the Run button is disabled until these arrive
     setBusy(true);
     setError(null);
     try {
@@ -206,16 +210,17 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
         attempts_per_task: k,
         concurrency: lanes,
         tasks_file: tasksFile,
-        max_steps: maxSteps.trim() === "" ? null : parsePositive(maxSteps, 40),
+        max_steps:
+          maxSteps.trim() === ""
+            ? null
+            : parsePositive(maxSteps, defaults.max_steps),
         record_video: recordVideo,
+        // Every fallback here is the SERVER's default, never a literal of our own.
         agent: {
           model: model || undefined,
-          temperature: parseNumber(
-            temperature,
-            defaults?.default.temperature ?? 1,
-          ),
-          top_p: parseNumber(topP, defaults?.default.top_p ?? 0.95),
-          top_k: parsePositive(topK, defaults?.default.top_k ?? 40),
+          temperature: parseNumber(temperature, defaults.default.temperature),
+          top_p: parseNumber(topP, defaults.default.top_p),
+          top_k: parsePositive(topK, defaults.default.top_k),
           budget_reminders: budgetReminders,
         },
       });
@@ -302,10 +307,16 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
               <label>
                 Attempts per task
                 <Info>
-                  Independent rollouts, each in a fresh gym, capped at {capSeconds}s.
-                  <br />
-                  {totalAttempts} at {lanes} in parallel: at most{" "}
-                  <b>~{worstCaseMinutes} min</b>.
+                  {capSeconds === null ? (
+                    "Loading run limits…"
+                  ) : (
+                    <>
+                      Independent rollouts, each in a fresh gym, capped at {capSeconds}s.
+                      <br />
+                      {totalAttempts} at {lanes} in parallel: at most{" "}
+                      <b>~{worstCaseMinutes} min</b>.
+                    </>
+                  )}
                 </Info>
               </label>
               <NumberField value={attempts} onChange={setAttempts} />
@@ -315,8 +326,8 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
               <label>
                 Concurrency
                 <Info>
-                  Rollouts at once, each with its own gym. Memory-bound, max{" "}
-                  {defaults?.max_gyms ?? 3}.
+                  Rollouts at once, each with its own gym. Memory-bound
+                  {defaults ? `, max ${defaults.max_gyms}` : ""}.
                 </Info>
               </label>
               <NumberField value={concurrency} onChange={setConcurrency} />
@@ -372,7 +383,7 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
                 <NumberField
                   value={maxSteps}
                   onChange={setMaxSteps}
-                  placeholder={String(defaults?.max_steps ?? 40)}
+                  placeholder={defaults ? String(defaults.max_steps) : ""}
                 />
               </div>
               <label className="inline-check">
@@ -414,9 +425,13 @@ export function NewRun({ onOpenJob }: { onOpenJob: (jobId: string) => void }) {
             className="btn btn-primary"
             style={{ width: "100%" }}
             onClick={() => run()}
-            disabled={busy || selected.size === 0}
+            disabled={busy || selected.size === 0 || !defaults}
           >
-            {busy ? "Starting…" : `Run ${totalAttempts} rollout(s)`}
+            {busy
+              ? "Starting…"
+              : !defaults
+                ? "Loading run limits…"
+                : `Run ${totalAttempts} rollout(s)`}
           </button>
         </div>
       </div>
