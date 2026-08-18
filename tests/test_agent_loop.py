@@ -19,6 +19,7 @@ from rlgym.agents.gemini_cu import (
     ANSWER_KEY,
     SUBMIT_ANSWER,
     SUBMIT_INSTRUCTION,
+    SUBMIT_REMINDER_THRESHOLD,
     GeminiComputerUseAgent,
 )
 from rlgym.computer import ActionRefused
@@ -205,47 +206,69 @@ def test_a_valid_call_is_unaffected(monkeypatch, tmp_path) -> None:
 # ----------------------------------------------------------------------------------------
 
 
-def test_step_budget_is_reported_by_default(monkeypatch, tmp_path) -> None:
-    """An agent asked to finish inside a budget it cannot observe is being measured on a
-    guess, so remaining steps are reported by default."""
+def test_the_agent_is_never_told_its_total_budget(monkeypatch, tmp_path) -> None:
+    """A per-step `steps_remaining` rode along in every payload from the first version of
+    this loop, so the agent read its remaining count on every turn. That made budget a
+    continuous input rather than a terminal warning: problem2 reached 72 and 83 steps when
+    the cap allowed it, but submitted at 46-50 under a 50 cap -- it expanded to fill
+    whatever it was shown, so raising the cap changed early pacing, not just the tail.
+    """
     agent = build_agent()
     run_with(
         monkeypatch,
         tmp_path,
-        [
-            model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2}),
-            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"}),
-        ],
+        [model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2})] * 3
+        + [model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"})],
         agent=agent,
-        max_steps=2,
+        max_steps=40,
     )
-
-    first = payloads_from(agent)[0]
-    assert first["steps_remaining"] == 1
-    # Within the threshold, so the observation also spells out what happens at the cap.
-    assert "reminder" in first
-
-
-def test_step_budget_can_be_turned_off(monkeypatch, tmp_path) -> None:
-    """Turning it off measures whether the agent can manage a budget it cannot see -- a
-    different question, and the reason this is a recorded field rather than a constant."""
-    agent = build_agent(AgentConfig(budget_reminders=False))
-    run_with(
-        monkeypatch,
-        tmp_path,
-        [
-            model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2}),
-            model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"}),
-        ],
-        agent=agent,
-        max_steps=2,
-    )
-
     observations = payloads_from(agent)
     assert observations, "the agent saw no observations at all"
     for payload in observations:
         assert "steps_remaining" not in payload
+        # 40 steps -> warns at 8 remaining, so nothing this early either.
         assert "reminder" not in payload
+
+
+def test_the_warning_arrives_only_inside_the_final_slice(monkeypatch, tmp_path) -> None:
+    """The warning starts exactly when 8 actions remain, whatever the cap."""
+    agent = build_agent()
+    run_with(
+        monkeypatch,
+        tmp_path,
+        [model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2})] * 16
+        + [model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"})],
+        agent=agent,
+        max_steps=20,
+    )
+    warned = ["reminder" in p for p in payloads_from(agent)]
+    # 20 steps -> threshold 8. Action i leaves 19-i remaining, so the warning starts at i=11.
+    assert warned[:11] == [False] * 11
+    assert warned[11:] == [True] * (len(warned) - 11)
+    assert "action(s) left" in payloads_from(agent)[11]["reminder"]
+
+
+def test_the_threshold_is_fixed_not_derived_from_the_cap() -> None:
+    """Wrapping up costs what it costs -- type, run, wait, read, submit -- so the warning
+    point does not scale with the budget. Across 118 submitted rollouts that gap was median
+    2, p75 3; 8 is generous against that. (The p90 was also 8, but circularly: the threshold
+    was already 8 in those runs, so a warned rollout had exactly 8 actions to finish in.)"""
+    assert SUBMIT_REMINDER_THRESHOLD == 8
+
+
+def test_the_warning_can_be_turned_off(monkeypatch, tmp_path) -> None:
+    """Off measures whether the agent can manage a budget it cannot see at all."""
+    agent = build_agent(AgentConfig(budget_reminders=False))
+    run_with(
+        monkeypatch,
+        tmp_path,
+        [model_turn("drag_and_drop", {"destination_x": 1, "destination_y": 2})] * 16
+        + [model_turn(SUBMIT_ANSWER, {ANSWER_KEY: "{}"})],
+        agent=agent,
+        max_steps=20,
+    )
+    for payload in payloads_from(agent):
+        assert "reminder" not in payload and "steps_remaining" not in payload
 
 
 def test_submit_instruction_carries_no_task_guidance() -> None:

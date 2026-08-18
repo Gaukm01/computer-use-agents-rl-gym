@@ -85,14 +85,8 @@ MAX_CONSECUTIVE_MALFORMED = 3
 # them 18 steps into otherwise sensible work.
 MALFORMED_ACTION_ERRORS = (KeyError, TypeError, ValueError, IndexError, AttributeError)
 
-# When this few steps remain, every observation carries an explicit instruction to submit.
-# Consulted only when AgentConfig.budget_reminders is on, which it is by default.
-#
-# Motivated by an observed failure rather than invented: an agent had the correct value on
-# screen at step 12, then spent its remaining 28 steps re-running queries trying to decide
-# whether a displayed 3.15 was rounded or exact -- and hit the cap without ever submitting.
-# It had no way to know the budget was running out. Turning the flag off measures whether an
-# agent can manage a budget it cannot see, which is a different question and a valid one.
+# Warn when this many actions remain. Fixed rather than a fraction of max_steps: wrapping up
+# costs a couple of actions whatever the budget is.
 SUBMIT_REMINDER_THRESHOLD = 8
 
 
@@ -364,22 +358,17 @@ class GeminiComputerUseAgent(BrowserAgent):
 
                     payload = {"url": result.url, **extra_fields}
 
-                    # Budget reporting is ON by default -- see AgentConfig.budget_reminders,
-                    # exposed in the console as "Step-budget awareness". Turning it off is the
-                    # ablation: the agent then sees only the page it is looking at, and
-                    # managing the budget becomes part of the task.
-                    #
-                    # Measured 2026-08-17, worth knowing before trusting it: two rollouts ran
-                    # to the 50-step cap and submitted nothing while being warned from step 42
-                    # on. The reminder did not rescue the case it was built for.
+                    # Only the terminal warning; the agent is never told its total
+                    # budget. A per-step steps_remaining used to ride along here, which made
+                    # a bigger cap change early pacing rather than just the tail.
                     if self._config.budget_reminders:
                         remaining = max_steps - len(steps) - 1
-                        payload["steps_remaining"] = remaining
                         if remaining <= SUBMIT_REMINDER_THRESHOLD:
                             payload["reminder"] = (
-                                f"Only {max(remaining, 0)} step(s) remain before this attempt "
-                                f"is cut off and scored zero. Call {SUBMIT_ANSWER} now with "
-                                "your best answer, even if you are not fully certain of it."
+                                f"Runtime budget: {remaining} action(s) left; an attempt that ends "
+                                f"without {SUBMIT_ANSWER} is discarded. Prioritise finishing the answer "
+                                "over further exploration. Mark anything you could not determine as "
+                                "unknown rather than guessing."
                             )
                     if refused:
                         # Hand the refusal back as an observation so the model can adapt

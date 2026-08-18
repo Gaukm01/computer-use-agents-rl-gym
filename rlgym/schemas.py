@@ -198,10 +198,15 @@ class AgentConfig(BaseModel):
 
 
 class Limits(BaseModel):
-    """Budgets enforced by the executor, not the agent."""
+    """Budgets enforced by the executor, not the agent.
+
+    max_steps is the budget being scored. timeout_s is a backstop for a wedged browser or a
+    stalled API, kept loose: TIMED_OUT scores 0, so a tight clock books our own slowness as
+    agent failure.
+    """
 
     max_steps: int = 40
-    timeout_s: int = 600
+    timeout_s: int = 900
 
 
 class TokenUsage(BaseModel):

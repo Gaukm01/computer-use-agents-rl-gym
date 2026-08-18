@@ -1,359 +1,413 @@
 # Design — What We Built
 
 A computer-use RL environment for Metabase: the gym, the agent, and the infrastructure that
-runs rollouts against it and turns them into reward.
+turns rollouts into reward. Reference notes for a code walkthrough.
 
-This document covers **what exists and why it is built that way**.
-The productionisation plan is separate: [`PRODUCTION.md`](./PRODUCTION.md).
-
----
-
-## 1. The shape of the problem
-
-An RL environment needs three things, and each one has a failure mode that quietly invalidates
-the numbers if you get it wrong:
-
-| Part | The real requirement | The failure mode if you get it wrong |
-|---|---|---|
-| **Gym** | Every rollout starts from *identical* state | Rollout 5 sees rollout 1's leftovers; results drift and nobody notices |
-| **Agent** | Acts through the same channel a human would | An API shortcut measures the wrong capability entirely |
-| **Infra** | Reward reflects the agent, not the plumbing | Infra flakiness gets scored as incapability and poisons the dataset |
-
-Every significant decision below traces back to one of those three columns.
-
-**The one hard constraint: the agent is visual-only.** Screenshots in, mouse and keyboard out.
-No REST API, no SQL connection, no DOM access. The *harness* does call Metabase's REST API — to
-mint a session, and to check the browser is not sitting on a login page — because the harness
-is infrastructure checking itself, never the policy perceiving its environment.
+Productionisation plan: [`PRODUCTION.md`](./PRODUCTION.md)
 
 ---
 
-## 2. Architecture
+# 1. Features built
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  HOST                                                                       │
-│                                                                             │
-│   React console  ──►  FastAPI  ──►  service.py  ──►  orchestrator           │
-│   (web/dist)          :8000         (no web framework in sight)             │
-│                          ▲                              │                   │
-│                          │ polls runs/<job>/job.json    │ thread pool       │
-│                          │                              ▼  (max 3)          │
-│                          │                    ┌──────────────────────┐      │
-│                          └────────────────────┤  ONE ROLLOUT         │      │
-│                                               │  = one subprocess    │      │
-│                                               │  + one private gym   │      │
-│                                               └───────┬──────────────┘      │
-│                                                       │                     │
-│   ┌───────────────────────────┐         ┌─────────────▼─────────────────┐   │
-│   │ Chromium (Playwright)     │  HTTP   │  DOCKER: one stack per rollout│   │
-│   │ 1440x900, pre-authed,     │◄───────►│  :3001 / :3002 / :3003        │   │
-│   │ domain-locked, recorded   │         │  ┌─────────────────────────┐  │   │
-│   └───────────▲───────────────┘         │  │ metabase v0.54.15       │  │   │
-│               │ PNG + url               │  │   └ H2 sample database  │  │   │
-│               │                         │  └───────────┬─────────────┘  │   │
-│   ┌───────────┴───────────────┐         │              │ JDBC           │   │
-│   │ Gemini computer-use loop  │         │  ┌───────────▼─────────────┐  │   │
-│   │ screenshot → model → act  │         │  │ postgres 16.9           │  │   │
-│   └───────────────────────────┘         │  │   └ metabase_app        │  │   │
-│                                         │  │     (restored from dump)│  │   │
-│                                         │  └─────────────────────────┘  │   │
-│                                         └───────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-> *Excalidraw to attach: `diagrams/architecture.png` — the same picture, with the "one stack
-> per rollout" box multiplied x3 to make the concurrency visible at a glance.*
+- **Ephemeral gym per rollout** — one `docker compose` project holding Metabase + Postgres,
+  seeded and destroyed per rollout. Nothing shared, so nothing to reset.
+- **Runtime seeding** — `pg_restore` of `metabase_envdata.sql` into a fresh Postgres *before*
+  Metabase is started.
+- **Visual-only agent** — Gemini computer-use driving real Chromium via Playwright. Screenshots
+  in, mouse/keyboard out; no API, SQL, or DOM access for the model.
+- **Answer channel** — a `submit_answer` tool ends the episode. No format hint given; choosing
+  the answer's shape is part of the task.
+- **Domain lock** — off-origin top-level navigation is refused and the refusal is handed back to
+  the model as an observation, not removed from its action space.
+- **Deterministic grader** — pure function of `(artifact, task)`, versioned, so stored
+  trajectories can be re-scored without re-running anything.
+- **Reward from status** — `1` / `0` / `null`. Infrastructure failure scores `null` and leaves
+  the pass@k denominator.
+- **Parallel rollouts** — thread pool over subprocesses over containers, bounded by a port queue
+  (3 concurrent, memory-bound).
+- **Job orchestration** — T tasks × K attempts, task-major, resumable, cancellable, with pass@k
+  and mean reward computed per task and per job.
+- **Live artifacts** — `artifact.json` is rewritten on every phase change and every step, so a
+  killed rollout keeps its trajectory and the UI can follow along by polling a file.
+- **Web console** — upload a `tasks.json`, pick tasks, set attempts and concurrency, watch phases
+  live, open any finished rollout.
+- **Transcript viewer** — per step: screenshot, model reasoning, action + args. Plus video, the
+  exact first prompt, and a grade panel with expected vs actual and the diff.
+- **Host-disk reclaim** — `fstrim` after every teardown, plus a free-space floor that ends a job
+  cleanly instead of crashing it.
+- **Health gate** — Docker, both images, the dump, and credentials checked before a run.
+- *Also:* tasks.json upload + validation, per-rollout `spec.json`, `worker.log` capture,
+  path-traversal guard on media, legacy-status translation, server-served agent defaults,
+  hash routing, 109 tests.
 
 ---
 
-## 3. The gym
+# 2. Not built / out of scope
 
-### Environment data is restored at runtime, per rollout
+Five things we would do next. Each is scoped, not speculative.
 
-`resources/metabase_envdata.sql` is a `pg_dump` custom-format archive of a Metabase **app**
-database — collections, dashboards, saved questions, users. Provisioning is four ordered steps:
+**1. Pristine-copy validation as an advisory signal, not a hard gate.**
+A seeded row-count mismatch currently raises during provisioning and the rollout becomes
+`NOT_OBSERVED` — strict, and it can cost a rollout for drift in a table we only assumed was
+stable. *Way to do it:* keep the query, drop the raise, record the counts plus a boolean on the
+artifact — drift becomes a trust score on the result rather than a failure of it.
 
-1. `docker compose up -d postgres` — **Postgres only**
-2. wait for `pg_isready`
-3. `pg_restore` the dump into `metabase_app`
-4. `docker compose up -d metabase`, then poll `/api/health`
+**2. Job run setup — a queue instead of a warning.**
+Only one job runs at a time: a job start sweeps orphaned containers and would destroy a
+concurrent job's gyms, so the console confirms first. There is also no way to re-run just the
+rollouts whose outcome was never observed. *Way to do it:* one worker thread draining a
+`Queue[JobSpec]` — `ports.py` is already this pattern and `JobStatus.QUEUED` sits unused in the
+enum; rollout-level retrigger then becomes re-enqueueing the failed slots.
 
-**Step 1 is only Postgres for a specific reason.** A plain `compose up -d` starts Metabase the
-instant Postgres reports healthy — that is what `depends_on: service_healthy` means — and
-Liquibase would then build a fresh schema into the empty database that collides with the
-restore. Starting Metabase *after* the restore removes the race structurally rather than
-relying on timing. The manual workflow only ever got away with it because a human is slower
-than Compose.
+**3. Ground-truth correctness check, with a human in the loop.**
+`problem2` fails every attempt because its provided answer is not reproducible in this database
+— found by hand with SQL, outside the platform, so nothing in the system distinguishes *"the
+agent was wrong"* from *"the task is wrong"*. *Way to do it:* have tasks carry the query that
+defines their answer, recompute it against a fresh gym on a schedule, and flag disagreements for
+review — the same surface collects human verdicts on near-misses.
 
-### One private stack per rollout, not one shared gym
+**4. Tool clock vs wall clock.**
+`duration_s` is wall clock: model latency, network, browser actions and page loads in one
+number. Useful for capacity planning, useless for reasoning about the agent. *Way to do it:*
+both halves are already recorded per step as `latency_ms` — split model time from action time,
+report them separately, and apply the timeout budget to agent time rather than infrastructure.
 
-Every rollout must start from identical state, and a shared gym cannot give that. We diffed a
-live app DB against the dump after ~15 rollouts: Metabase writes back on its own as the agent
-navigates, and some of what it writes is **visible to the next agent** — the "Pick up where you
-left off" list on the home page had already lost a dozen seeded entries. That is progressive,
-irreversible drift, not a shuffle that stabilises, and no targeted cleanup restores it.
+**5. Concurrency is capped at 3.**
+Bound by VM memory, not by anything clever: each rollout holds its own Metabase (~1.08 GiB) in a
+7.74 GiB VM, and 33.6 s of every rollout goes on booting a stack that is then thrown away.
+*Way to do it:* a pre-warmed pool moves the boot off the critical path; beyond that concurrency
+is a machine-count problem, which is where [`PRODUCTION.md`](./PRODUCTION.md) picks it up.
 
-Rather than build a reset primitive and then have to trust it, **each rollout boots its own
-Postgres and its own Metabase, restores the dump, and destroys the stack**. Nothing is reused,
-so nothing has to be cleaned. Contamination is impossible by construction rather than by
-correctness of a reset path.
-
-Two properties fall out for free:
-
-- **The analytics data is isolated too.** `/plugins` is deliberately *not* volume-mounted, so
-  Metabase's bundled H2 sample database lives in the container's writable layer and every
-  fresh container extracts a pristine copy from the image.
-- **Crash isolation.** A wedged JVM or a corrupted volume costs one rollout.
-
-The cost is honest and measured: **33.6 s of provisioning per rollout**, against a ~285 s
-rollout — roughly 12% overhead to eliminate an entire class of silent-corruption bug.
-
-### Verifying the restore
-
-Provisioning checks the seeded row counts before the agent starts, and records them on the
-rollout's artifact. A partially restored database is wrong ground truth presented as a valid
-run, so this fails the rollout rather than grading against incomplete data. Only tables
-Metabase does not touch during its own boot can be checked this way.
-
-### Teardown escalates, then recounts
-
-The first version fired `compose down -v` and ignored the exit code. When the host disk filled,
-`down` failed, six containers survived, and nothing noticed — and because the port returns to
-the pool regardless, the *next* rollout on that port failed with "port already allocated". One
-bad rollout poisoned every later one.
-
-Teardown now escalates — `down` → `down` again → `docker rm -f` by project label → remove
-named volumes — and then **recounts**, because the failure mode was precisely *a command
-reporting success while doing nothing*. Failure is recorded on the artifact
-(`teardown_error`) and never raised: a leaked container is an operational problem, not the
-agent's fault, and the rollout's real result must survive.
+*Write tasks, distributed execution and durable state are deliberately deferred to
+[`PRODUCTION.md`](./PRODUCTION.md) rather than half-built here.*
 
 ---
 
-## 4. The agent
+# 3. How it works
 
-We **subclass** `google-gemini/computer-use-preview` rather than fork it. Upstream's action
-mapping (clicks, typing, scrolling, key handling, drag) is long, correct, and version-aware
-across the modern and legacy tool sets, so it is reused verbatim. The loop around it is
-replaced, for four reasons:
+## 3.1 Job submitted → queued and scheduled
 
-| Upstream behaviour | Why it cannot be used for rollouts |
-|---|---|
-| `except Exception: return "COMPLETE"` | A Gemini 5xx becomes indistinguishable from finishing the task — reward would correlate with API flakiness |
-| `while status == "CONTINUE"` | No step cap; an unattended rollout could run forever |
-| Safety confirmations call `input()` | A batch job would hang on a human prompt |
-| No instrumentation | We need per-step screenshot, reasoning, latency and tokens |
+### 3.1.1 Validation and the job document
 
-### The answer channel
+`service.submit_job()` → `rlgym/service.py:287`
 
-A `submit_answer` function tool is added alongside the computer-use tool. Calling it ends the
-episode. Its description says only which function, which argument, and that it ends the task —
-deliberately **no example and no format hint**, because working out what shape the answer
-should take is part of what is being measured. Supplying it would be scoring our own
-scaffolding.
+- Rejects unknown task ids, `attempts < 1`, `concurrency < 1` *before* any work starts.
+- `orchestrator.build_spec()` freezes the policy into a `JobSpec` — model, temperature, top_p,
+  top_k, budget reminders, limits. The job page later reads config from this, not from the form.
+- `_start_background()` runs the job on a daemon thread and joins 1 s, so the caller gets real
+  state instead of a placeholder.
 
-### The environment boundary is an observation, not a missing tool
+`run_job()` → `rlgym/orchestrator.py:263` writes a row for **all T×K rollouts immediately**, so
+the console renders the full grid from second one. Placeholder rows carry no `attempt_id`, which
+is what marks them un-openable.
 
-`excluded_predefined_functions=[]` — the agent may attempt any action. A domain lock refuses
-off-origin *top-level* navigation and hands the refusal **back to the model as an
-observation**, so it can adapt instead of silently repeating a no-op. Sub-resources (fonts,
-CDN scripts Metabase itself pulls) are allowed; only main-frame navigation is blocked. The
-environment has a boundary; we do not hand-tune what the agent is allowed to try.
+### 3.1.2 Orphan sweep
 
-### A malformed call is the agent's mistake, not ours
+`gym_stack.sweep()` removes every container labelled `rlgym.ephemeral` left by a Ctrl-C or a
+killed API process, then **recounts** — an earlier version returned the number *found* and
+reported "swept 6" having removed none.
 
-The model sometimes emits a call the tool schema cannot satisfy — `drag_and_drop` without an
-`x`, for instance. An earlier version treated that as a harness failure, which ended the
-rollout and **deleted it from the pass@k denominator**. Three rollouts in one job died that
-way, one of them 18 steps into otherwise sensible work.
+### 3.1.3 Task-major queueing
 
-Now the raw exception is handed back as an observation and the episode continues. It costs a
-step, so a model that keeps emitting bad calls still terminates — as `MAX_STEPS_EXCEEDED` with
-reward 0, which is an honest verdict about the agent rather than about us.
-
-### Step-budget awareness (a named ablation, on by default)
-
-Each observation carries `steps_remaining`, and within 8 steps of the cap an explicit
-instruction to submit. This exists because of an observed failure: an agent had the correct
-value on screen at step 12, then spent 28 steps re-verifying whether a displayed `3.15` was
-rounded, and hit the cap without submitting.
-
-It is a recorded config field rather than a constant, because it materially changes what a run
-measures — runs with it on and off are not comparable. **Measured honestly: it did not rescue
-the case it was built for.** In the 50-rollout job, two rollouts ran to the 50-step cap and
-submitted nothing while being warned from step 42 onward.
-
----
-
-## 5. Reward
-
-Reward is not decided by the agent or the executor. It falls out of a terminal **status**,
-with one deliberate asymmetry.
-
-```
-      stop reason                  status                    reward
-   ─────────────────────────────────────────────────────────────────
-      SUBMITTED          ──►  ANSWERED ──grader──►  COMPLETED_CORRECT   1
-                                   └──────────────► ANSWERED            0
-      NO_FUNCTION_CALL   ──►  ANSWERED                                  0
-      MAX_STEPS          ──►  MAX_STEPS_EXCEEDED                        0
-      TIMEOUT            ──►  TIMED_OUT                                 0
-   ─────────────────────────────────────────────────────────────────
-      API_ERROR          ──┐
-      HARNESS_ERROR      ──┼─►  NOT_OBSERVED                         null
-      SAFETY_BLOCKED     ──┤         (excluded from pass@k entirely)
-      GYM_PROVISION_FAIL ──┤
-      GYM_AUTH_FAILED    ──┘
+```python
+queue = [(task, index) for task in selected for index in range(K)]
 ```
 
-**`NOT_OBSERVED` is `null`, not `0`.** It means *we failed to observe an outcome* — the API was
-exhausted, the browser died, the gym would not provision. Scoring that as 0 would make reward
-correlate with infrastructure flakiness and quietly bias any dataset built from these
-artifacts. It is the single most important decision in the project.
+A task's K rollouts are all *submitted* before the next task's, so a half-finished job has
+complete, usable results for some tasks rather than one sample of everything. Submission order
+only — there is no barrier, so a task's last rollout overlaps the next task's first.
 
-There is exactly one hand-off: the executor writes `ANSWERED` before grading, and only the
-grader can promote it to `COMPLETED_CORRECT`. The reward function lives in one place.
+### 3.1.4 Threading model
 
-> *Excalidraw to attach: `diagrams/reward-state-machine.png` — the diagram above, with the
-> `null` branch visually separated from the `0` branch.*
+```python
+workers = max(1, min(spec.concurrency, ports.MAX_GYMS))
+with ThreadPoolExecutor(max_workers=workers) as pool: ...
+```
 
-### The grader
+Threads are correct here **because they only supervise** — each parks in `Popen.wait()` and
+Playwright never runs in this process. Capped at `MAX_GYMS` because an extra thread would only
+block inside `ports.claim()`.
 
-A pure function of `(artifact, task)`, with an `EVALUATOR_VERSION`, so stored trajectories can
-be re-scored after a rule change without re-running a single rollout. It solves three real
-problems in this task set:
+### 3.1.5 Ports are the concurrency semaphore
 
-1. **Formatting.** Metabase renders `101203.3` as `101,203.3`, and a model may echo `5` as
-   `5.0`. Numbers are compared numerically with tolerance; only a string that is *entirely* a
-   number is treated as one, so `"Q4"` and product titles stay text.
-2. **Order.** `problem9` asks for a set of names where order carries no meaning, so lists
-   compare as multisets.
-3. **Pairing — the subtle one.** `problem1` returns `product_titles` and `ratings` as parallel
-   arrays where element *i* of each corresponds. Comparing them independently as multisets
-   would accept an answer with all the right titles and all the right ratings *paired wrongly*.
-   Equal-length list values under a shared object are therefore zipped into tuples before
-   comparison, so every value stays bound to its label.
+`rlgym/ports.py` — the whole allocator is a `queue.Queue` pre-filled with 3001–3003.
 
-Tolerance is confined to how the answer *arrives*; whether it is *right* stays strict. A
-near-miss flag marks answers that are structurally correct but just outside tolerance, so a
-human can look rather than trusting them as clean agent failures.
+- `claim()` blocks on `get()` when all three are taken. No pool manager, slot table, or leases
+  anywhere in the system.
+- The `finally` returns the port unconditionally, so a failed provision does not leak capacity.
+- `MAX_GYMS = 3` is measured: 4 vCPU / 7.74 GiB VM, ~1.08 GiB per Metabase. **Memory is the
+  ceiling, not API quota.** Port 3000 is left free for a manual dev gym.
 
----
+### 3.1.6 Resume and the disk floor
 
-## 6. The infrastructure
+- `load_completed_attempts()` skips any slot already terminal, so resuming costs only lost work.
+- `_host_free_gib() < 8.0` → `cancel.set()`, checked per rollout. Turns a crash at rollout 25
+  into a clean partial result with a stated reason.
 
-### Three levels of parallelism, each forced by a different constraint
+### 3.1.7 Tracking rollouts via `artifact.json`
 
-| Level | Unit | Mechanism | Why not something else |
-|---|---|---|---|
-| Job | T x K rollouts | `ThreadPoolExecutor` | Threads are correct *because* they only supervise — every worker parks in `Popen.wait()`, and Playwright never runs in this process |
-| Rollout | one attempt | `subprocess.Popen` | Playwright's sync API is not thread-safe; a wall clock must be enforceable by SIGKILL; a crashed browser should cost one rollout |
-| Gym | Postgres + Metabase | one compose project | Isolation must be per rollout, not per job |
-
-**`ports.py` is the entire allocator, and the queue *is* the semaphore.** `claim()` blocks on
-`get()` when all three ports are taken, so nothing anywhere needs a pool manager, slot table,
-or lease bookkeeping. `MAX_GYMS = 3` is measured, not guessed: 4 vCPU / 7.74 GiB VM, ~1.08 GiB
-Metabase RSS + ~54 MiB Postgres, so three stacks sit near 3.4 GiB with headroom for JVM boot
-spikes. **Memory is the ceiling today, not API quota.**
-
-**Teardown lives in the parent process, wrapping the subprocess — never inside the worker.** A
-timeout kills the worker with SIGKILL, which runs no `finally`, so teardown placed there would
-leak a container and a port on exactly the path that most needs cleaning up. It also keeps the
-rollout's timeout a pure *agent* budget: provisioning is not charged against it.
-
-### Progress needed no new plumbing
-
-Both the parent (phases) and the worker (every step) already rewrite `artifact.json`. A
-watcher thread reading those files is therefore the whole progress mechanism — no callback has
-to cross the subprocess boundary. Two paths write job rows, and the split matters:
+Two writers, and the split is the whole progress mechanism:
 
 | Path | Source | When |
 |---|---|---|
 | `apply()` | the artifact the executor **returned** | rollout finished |
 | `refresh()` | `artifact.json` **on disk**, every 2 s | rollout in flight |
 
-`refresh()` skips slots already settled by `apply()`, so a live poll can never overwrite a
-finished result — and `apply()` uses the value in hand, so a successful rollout cannot vanish
-from the tally over an I/O error.
-
-### Scheduling is task-major, and jobs are resumable
-
-A task's K rollouts are all *submitted* before the next task's, so a half-finished job has
-**complete, usable** results for some tasks rather than one sample of everything with nothing
-settled. There is no barrier between tasks, so a task's last rollout overlaps the next task's
-first. `job.json` carries a row for every one of the T x K rollouts from second one, which is
-what lets the console render the full grid with queued slots greyed out.
-
-Resume skips any rollout already in a terminal state, so an interrupted 30-rollout job costs
-only the work that was actually lost.
-
-### The failure that shaped the infrastructure
-
-Two 30-rollout jobs died of host disk exhaustion. The first diagnosis — "the host is simply
-full, `colima restart` fixes it" — was true and **not enough**, so it recurred at almost the
-same point. The real cause:
-
-```
-~/.colima/.../datadisk   allocated: 23 GiB
-inside the VM: /var/lib/docker   2.1 GiB used of 59 GiB  (4%)
-```
-
-23 GiB of host blocks holding 2.1 GiB of live data. The VM's data disk is ext4 mounted
-**without `discard`**, so when Docker removes a container layer the blocks are freed *inside*
-the guest filesystem and nothing ever issues TRIM to the virtual device. The host's sparse
-image never gives them back, and ext4 scatters allocations, so each create/destroy cycle
-touches ~1 GiB of *fresh offsets*, permanently.
-
-`rm` inside a guest cannot shrink a host disk image. Our cleanup was at the Docker layer and
-the growth was one layer below it. Three fixes shipped:
-
-- `reclaim_host_disk()` runs `fstrim` after every teardown → host growth **1024 MB → 0.8 MB
-  per rollout**, and each artifact records `host_image_gib` / `guest_used_gib` as a pair,
-  because a single number is what made this invisible for a full job.
-- A free-space floor stops a job **cleanly** with a stated reason instead of crashing at
-  rollout 25.
-- State writes now swallow `OSError`. This was the sharpest lesson: **the error path depended
-  on the resource that failed** — the handler that recorded the job as FAILED wrote to disk,
-  that write also failed, and the exception killed the supervising thread. The job then sat at
-  `RUNNING` with nothing running.
-
-What the incident proved is the point worth making: **the reward contract held under genuine
-infrastructure failure.** 25 rollouts were graded, durable, and valid; 5 were `NOT_OBSERVED`
-with reward `null`, excluded rather than booked as agent failures.
+A watcher thread polls only in-flight rollouts (`skip=settled`), so a live poll can never
+overwrite a finished result, and no callback has to cross the subprocess boundary. `apply()`
+uses the value in hand so a successful rollout cannot vanish over an I/O error.
 
 ---
 
-## 7. The console
+## 3.2 One rollout, phase by phase
 
-Not pretty, and deliberately so — it exists to make rollouts legible.
+`execute_attempt()` → `rlgym/executor.py:334`. Phases: `QUEUED → PROVISIONING →
+AUTHENTICATING → CONNECTING → RUNNING → GRADING → DONE`.
 
-- **New run** — upload a `tasks.json` (validated *before* it is stored, and the stored path is
-  what the job actually runs), pick tasks, set attempts per task and concurrency, choose the
-  model and sampling parameters, and see the worst-case wall clock before committing.
-- **Job page** — polls every 2 s. A progress bar over passed / failed / not-observed / running
-  / queued, and a per-rollout chip grid. Because provisioning takes ~35 s, an in-flight rollout
-  shows a phase checklist (*booting gym → minting a session → attaching the browser → agent
-  working, step N*) rather than looking hung. The agent config is read from the **job's own
-  spec**, so the page reports the policy that produced the numbers, not the form's current
-  state. The headline pass rate is withheld until the job ends — a rate over three of thirty
-  rollouts is not the run's result.
-- **Transcript** — one step per slide: the screenshot the agent saw, its reasoning, the action
-  and arguments, refusals and malformed calls flagged distinctly. Plus a **Context** tab
-  showing the exact first turn the agent received, a **Video** tab, and a grade panel with
-  expected vs actual, the diff, and the near-miss flag.
+### 3.2.1 Subprocess isolation
 
-> *Excalidraw to attach: `diagrams/rollout-lifecycle.png` — a swimlane across
-> scheduler / gym / agent / grader / artifacts, with the phases the console displays marked on
-> the gym and agent lanes.*
+```python
+proc = subprocess.Popen([sys.executable, "-m", "rlgym.executor", "--worker", spec_path],
+                        start_new_session=True)
+proc.wait(timeout=limits.timeout_s + SHUTDOWN_GRACE_S)   # 45 s grace
+```
+
+Three independent reasons, any one of which forces it: Playwright's sync API is not
+thread-safe; a wall clock must be enforceable by SIGKILL; a crashed browser should cost one
+rollout. `start_new_session=True` gives its own process group, so `os.killpg()` takes the
+browser and driver down with it.
+
+**Provisioning and teardown live in the parent**, wrapping the `Popen` — SIGKILL runs no
+`finally`, so teardown inside the worker would leak a container and a port on exactly the path
+that most needs cleanup. It also keeps `timeout_s` a pure *agent* budget.
+
+### 3.2.2 Pristine Metabase — containers and restore
+
+`ephemeral_gym()` → `rlgym/gym_stack.py:417`
+
+Project name is `rlgym-<attempt_id>`, sanitised — task ids come from an uploaded file and are
+not guaranteed to be legal compose names.
+
+```
+1. docker compose up -d postgres        ← Postgres ONLY
+2. wait for pg_isready (docker inspect health)
+3. pg_restore /resources/metabase_envdata.sql   ← exit code checked, not assumed
+4. docker compose up -d metabase        ← only now
+5. poll /api/health until 200
+6. assert seeded row counts
+```
+
+**Step 1 is Postgres alone on purpose.** A plain `compose up -d` starts Metabase the instant
+Postgres reports healthy — `depends_on: service_healthy` — and Liquibase then builds a schema
+into the empty database that collides with the restore. Ordering removes the race structurally
+rather than by timing.
+
+Compose details worth pointing at: `MB_HOST_PORT` is required with **no default** (a silent
+fallback to 3000 would collide the moment two stacks run); no `container_name` (names are
+globally unique per daemon); no restart policy (an ephemeral stack must not resurrect);
+`/plugins` deliberately **not** volume-mounted, so each container extracts a fresh H2 sample
+database from the image — analytics isolation for free.
+
+Step 6 records the counts on the artifact: a partially restored database is wrong ground truth
+presented as a valid run.
+
+### 3.2.3 Auth
+
+`mint_session()` → `rlgym/gym_stack.py:172`
+
+- `POST /api/session` over HTTP, ~50 ms. **Deliberately not Playwright** — its sync API cannot
+  be driven from pool threads, the same constraint that makes rollouts subprocesses.
+- `write_storage_state()` writes the `metabase.SESSION` cookie with `domain: "localhost"`;
+  cookies ignore port, so one shape works for every stack.
+- `service.check_auth()` then calls `GET /api/user/current` — it proves the cookie **works**,
+  not that a file exists. A stale session is infrastructure failure, not agent failure.
+
+### 3.2.4 Agent hookup
+
+#### Browser — `GymComputer.__enter__` → `rlgym/computer.py:101`
+
+- Chromium launched headless with `--disable-file-system`, `--disable-extensions`,
+  `--disable-dev-shm-usage`; viewport 1440×900.
+- `storage_state` injected at context creation, so the rollout opens already authenticated.
+- `record_video_dir` set; Playwright only finalises the file when the **context** closes, so
+  `__exit__` reads `page.video` first, then closes context, then browser.
+- `context.route(is_off_origin, guard)` — the predicate only matches off-origin URLs, so all
+  Metabase traffic is never intercepted and pays no latency. Only main-frame navigation is
+  aborted; sub-resources pass.
+- Pre-flight: `wait_for_ready()` (networkidle) then `is_authenticated()` — if the URL is
+  `/auth/login`, fail as `NOT_OBSERVED` rather than letting the agent burn its budget on a
+  login form.
+
+#### Prompt and tools
+
+`build_prompt()` → `rlgym/executor.py:157`
+
+```
+TASK_PREAMBLE   "The app is already loaded in the browser and authenticated…"
++ task.task
++ SUBMIT_INSTRUCTION   (appended by the agent — it describes that agent's tooling)
+```
+
+The preamble states environment facts only: it does not name the product, say where anything
+is, or describe the answer's shape.
+
+Tools: `ComputerUse(environment=ENVIRONMENT_BROWSER, excluded_predefined_functions=[])` plus a
+`submit_answer` declaration. Nothing is excluded — the domain lock is an environment invariant,
+not a trimmed action space. `thinking_config(include_thoughts=True)` so reasoning is recorded.
+
+#### The loop — `rlgym/agents/gemini_cu.py:168`
+
+```
+while len(steps) < max_steps:
+    check deadline → TIMEOUT
+    get_model_response()          # 5 retries w/ backoff upstream; raises, we classify
+    extract_function_calls()
+    for call:
+        submit_answer? → parse, record, return SUBMITTED
+        handle_action(call)       # upstream's mapping, reused verbatim
+        screenshot → StepRecord → on_step() → write_artifact()
+        FunctionResponse(inline PNG + url [+ reminder near cap] [+ error])
+    _prune_old_screenshots()      # keep images for the last 3 turns only
+```
+
+- We subclass `BrowserAgent` but **do not call `super().__init__()`** — upstream builds its
+  client with `project`/`location` unconditionally, which google-genai rejects alongside an API
+  key.
+- **Malformed calls are the agent's mistake.** `KeyError`/`TypeError`/… from `handle_action` are
+  caught, the raw exception is returned as an observation, and the episode continues. It costs a
+  step. Ending the rollout instead would convert a real agent failure into `NOT_OBSERVED` and
+  delete it from the pass@k denominator — that happened to three rollouts in one job.
+- **Budget reminders fire only near the cap.** Within `SUBMIT_REMINDER_THRESHOLD` actions of
+  the limit, the observation carries a line telling the agent to finish, submit, and mark
+  anything undetermined as unknown rather than guess. Nothing is attached the rest of the time,
+  so the agent is not fed a countdown it did not need. `budget_reminders` is recorded per job,
+  because a run with it off measures something different.
+- **Safety confirmations are auto-acknowledged** and counted; upstream calls `input()` here,
+  which would hang a batch run.
+- Screenshot pruning matters: without it context grows by a full-page PNG per step and cost
+  climbs quadratically.
+
+**Termination:** `SUBMITTED` · `NO_FUNCTION_CALL` (model stopped acting) · `MAX_STEPS` ·
+`TIMEOUT` · `API_ERROR` · `HARNESS_ERROR` · `SAFETY_BLOCKED`.
+
+### 3.2.5 Grading layer
+
+`grade_attempt()` → `rlgym/executor.py:510` · `grader.grade()` → `rlgym/grader.py:277`
+
+Status gate first — only `ANSWERED`/`CORRECT` are compared; everything else takes its reward
+from status. Only the grader may promote to `COMPLETED_CORRECT`; the reward function lives in
+one place.
+
+**Leniency — confined to how the answer arrives:**
+
+- Numeric strings → float, stripping `,` `$` `%`. Only a string that is *entirely* a number
+  converts, so `"Q4"` and product titles stay text.
+- `math.isclose(rel_tol=1e-6, abs_tol=1e-2)` — `problem4` and `problem10` pass only because of
+  this; the provided answers are rounded display values.
+- Keys casefolded and whitespace-collapsed.
+- `{"answer": X}` envelope unwrapped as a **fallback**, not unconditionally — a task whose real
+  answer has one `answer` key would otherwise be unmatchable.
+
+**Match handling:**
+
+- Dicts: key sets must match exactly; missing/extra keys are reported by name.
+- Lists: multiset comparison (greedy, because float tolerance is not hash-equivalent), so
+  `problem9`'s name set passes in any order.
+- **Parallel arrays — the one that catches a cheat.** Two or more equal-length list values under
+  the same object are zipped into tuples before comparison. Otherwise an answer with every right
+  title and every right rating, **paired wrongly**, would pass.
+- `near_miss` flags structurally-right-but-outside-tolerance (within 5%, or substring for text)
+  so a human looks instead of trusting it as a clean failure.
+
+**Cleanup / containment:** a grader exception is caught and recorded as `not_graded` rather than
+propagating — it runs inside a pool future, so one malformed `task.answer` would otherwise fail
+a 30-rollout job. `EVALUATOR_VERSION` is stamped on every verdict, and `evaluation.json` is
+written separately from the artifact so re-grading never mutates the trajectory.
+
+### 3.2.6 Teardown, kill, and disk reclaim
+
+Runs in the parent's `finally`, so it executes on every path including SIGKILL.
+
+**Teardown escalates, then recounts:**
+
+```
+compose down -v --remove-orphans
+  → down again                     (the daemon can be transiently busy under 3 stacks)
+  → docker rm -f  by compose-project label
+  → docker volume rm <project>_*   (docker rm does NOT remove named volumes)
+  → RECOUNT containers and volumes
+```
+
+*The earlier miss:* the first version fired `down -v` and **ignored the exit code**. When the
+host disk filled, `down` failed, six containers survived, nothing noticed — and since the port
+returns to the pool regardless, the next rollout on that port died with "port already
+allocated". One bad rollout poisoned every later one. Failure is now recorded as
+`teardown_error` and never raised: the agent's result must survive an operational problem.
+
+**Then `fstrim`** — `reclaim_host_disk()` → `rlgym/gym_stack.py:314`
+
+The VM's data disk is ext4 mounted **without `discard`**, so `docker rm` frees blocks inside the
+guest and nothing tells the host's sparse image. Growth was ~1 GiB per rollout, monotonic; two
+30-rollout jobs died of it while the guest filesystem sat at 4% used. `fstrim` after teardown
+took host growth to **0.8 MB per rollout**. Each artifact records `host_image_gib` and
+`guest_used_gib` as a **pair** — a single number is what made this invisible for a whole job.
+
+Serialised behind a lock (three lanes would duplicate the same free-block walk) and a no-op off
+colima. Never raises; failure lands on `trim_error`.
+
+**Then the port returns** via `ports.claim()`'s own `finally`.
 
 ---
 
-## 8. Results
+## 3.3 What the console reads
 
-Real numbers from the two most recent jobs, both on the current code.
+- Job page polls `GET /api/jobs/{id}` every 2 s. `read_job()` recomputes derived numbers from
+  the rollout rows, so a `job.json` written before a counter existed still reports it correctly.
+- Transcript loads `artifact.json` + `evaluation.json`; screenshots and video stream through a
+  media route that resolves paths inside the rollout directory only.
+- `isGraded = terminal && phase === "DONE"` — the executor writes `ANSWERED` before grading, so
+  gating on status alone would flash "Failed" on a rollout about to pass.
+- No websockets. Polling a file is the entire live-progress mechanism.
 
-**5 tasks x 10 attempts, concurrency 3 — 50 rollouts, 91 min, 21.8 M tokens**
+---
+
+# 4. Validation
+
+Two different questions, and they need different evidence: **is the platform correct**, and
+**how did the agent score**. A pass rate only answers the second.
+
+## 4.1 Is the platform correct?
+
+Not one successful run — every check below is recorded *per rollout* and holds across **65
+rollouts in two independent jobs**. The gym, orchestration, executor and grader are unchanged
+since those runs, so these results describe the current platform.
+
+| Check | Evidence | Result |
+|---|---|---|
+| Every rollout starts from identical state | `pristine_counts` on each artifact | **65/65** identical: `{recent_views: 73, report_card: 86}` |
+| Isolation holds; nothing leaks | `teardown_error`, `trim_error` per rollout | **0 and 0** |
+| No port collision under concurrency | `gym_url` per rollout | 3001 ×21 · 3002 ×22 · 3003 ×22 |
+| Parallelism is real, not nominal | wall clock vs serial estimate | **2.9×** on 3 lanes — *in both jobs independently* |
+| The grader discriminates both ways | verdicts + diffs | 52 pass / 13 fail, **4 distinct** failure reasons |
+| The gym reproduces the provided ground truth | independent SQL check | **9 of 10** answers reproduce exactly |
+| Reward survives infrastructure failure | the two disk-exhaustion jobs | 25/30 graded and valid; 5 correctly `null` |
+
+Two of those deserve a sentence:
+
+- **The grader is not rubber-stamping.** `problem1`/`3`/`4` at 10/10 are the positive control,
+  `problem2` at 0/10 for a diagnosable reason is the negative control, and `problem5` at 8/10
+  shows the harness captures genuine sampling variance rather than being deterministic by
+  accident. Failures come back with legible diffs, not a bare `false`.
+- **2.9× is close to the 3.0× ceiling**, and it landed twice on different job shapes — so the
+  bound really is the port queue, not contention we failed to notice.
+
+## 4.2 What the agent scored
+
+Pass rates measure the agent, not the platform, and they move with the prompt. The task preamble
+and the near-cap reminder have been reworded since these runs, so treat the numbers as a
+snapshot of that policy rather than a current benchmark.
+
+**5 tasks × 10, concurrency 3 — 50 rollouts, 91 min, 21.8 M tokens**
 
 | Task | pass@10 | Passed | Avg time | Avg steps |
 |---|---|---|---|---|
@@ -363,103 +417,36 @@ Real numbers from the two most recent jobs, both on the current code.
 | problem5 | yes | 8/10 | 295 s | 34 |
 | problem2 | **no** | **0/10** | 436 s | 49 |
 
-pass@10 across graded tasks: **80%** · mean reward **0.76** · **0 not-observed**
+pass@10 **80%** · mean reward **0.76** · **0 not-observed**
 
-**5 tasks x 3 attempts, concurrency 3 — 15 rollouts, 27 min, 7.1 M tokens**
-pass@3: **100%** of tasks · mean reward **0.93** · **0 not-observed**
+**5 tasks × 3 — 15 rollouts, 27 min, 7.1 M tokens.** pass@3 **100%** of tasks · mean reward
+**0.93** · **0 not-observed.** This is the job committed under `runs/`, browsable without an
+API key.
 
-Cost anatomy, because it drives everything in `PRODUCTION.md`: **~500k tokens per rollout at a
-prompt:output ratio of ~500:1.** This is entirely a screenshot problem — three 1440x900 PNGs
-retained per turn, ~13k prompt tokens per step.
+**Cost anatomy:** ~450 k tokens per rollout at prompt:output ≈ **380:1** — three 1440×900 PNGs
+retained per turn, ~13 k prompt tokens per step. Entirely a screenshot problem.
 
-### Why `problem2` can never pass
+## 4.3 The one negative result worth stating
 
-Its expected counts (996 / 700 / 664) are **larger than any product's order count in this
-database** — the busiest product has 174 orders. We checked three readings of the prompt with
-SQL against the gym's own sample data; none reproduces the answer, and none of the three named
-products even carries a rating of 5. Independently, **9 of the 10 provided answers do reproduce
-exactly**, which is what makes this one identifiable as a task-level discrepancy rather than a
-grader bug.
-
-**Action taken in the platform: none.** The answer stays exactly as provided and `problem2`
-keeps being graded against it. This note exists so a 0% pass rate is attributed to the task
-rather than to the agent. Two other tasks (`problem4`, `problem10`) pass *only* because the
-grader has numeric tolerance — the provided answers are the rounded, displayed values while
-the data is full precision.
+**`problem2` cannot pass — the task, not the agent.** Its expected counts (996 / 700 / 664)
+exceed any product's order count in this database; the busiest has 174. Three readings of the
+prompt were checked with SQL and none reproduces it, and none of the three named products even
+carries a rating of 5. That 9 of the other 10 answers reproduce exactly is what makes this a
+task-level discrepancy rather than a grader bug. Graded against the provided answer, unchanged.
 
 ---
 
-## 9. What we would add next
+# 5. Known limitations
 
-Deliberately not built, and each one is a small, well-understood piece of work rather than a
-rethink.
-
-**1. Seed validation as an advisory signal, not a hard gate.**
-Today a row-count mismatch raises during provisioning and the rollout becomes `NOT_OBSERVED`.
-The better version records the counts and a boolean on the artifact and lets the rollout
-proceed, so drift becomes a *trust score* on the result rather than a failure of it — and a
-systematic drift shows up as a trend instead of an outage.
-
-**2. A ground-truth correctness checker.**
-When a task fails on every attempt, the interesting question is whether the *agent* or the
-*task* is wrong. We answered that for `problem2` by hand, with SQL, outside the platform. The
-product version is a checker that recomputes each task's expected answer from the live
-environment and diffs it against the task file, so environment drift or a bad answer surfaces
-as a failing check rather than as a mysterious pass-rate drop. Not built because it needs tasks
-to carry the *query* that defines their answer, which is a bigger change to the task format
-than it first appears.
-
-**3. Reuse a pre-warmed Metabase stack instead of booting one per rollout.**
-Provisioning is 33.6 s of every ~285 s rollout. A small pool of pre-started stacks, leased and
-returned, would hide almost all of it — the boot happens before the rollout is dequeued rather
-than inside it. Not built because reuse reintroduces exactly the contamination question that
-per-rollout stacks removed, and correctness came first at this scale. It is the natural first
-optimisation once writes and reset are designed properly; covered in
-[`PRODUCTION.md`](./PRODUCTION.md).
-
-**4. Retriggering failed rollouts.**
-Job-level resume exists and works, but only from the CLI, and it treats `NOT_OBSERVED` as done
-rather than retrying it. What is missing is the obvious operator action: *re-run just the
-rollouts whose outcome was never observed*, from the console, into the same job. Not built
-because it needs a decision about identity — a retry is a new rollout with a new trajectory,
-so either the slot is overwritten (losing the failed attempt's record) or the job grows a
-second row for the same K index.
-
-**5. Tool clock vs wall clock.**
-`duration_s` today is wall clock: model latency, network, browser actions, and page loads all
-in one number. That makes it useful for capacity planning and useless for reasoning about the
-agent. A tool clock would separate per-turn *agent* time (model call) from *environment* time
-(action execution and page settle) — both are already measured per step as `latency_ms`, they
-are simply summed. Splitting them would let us answer "is this task slow because the model
-thinks hard or because Metabase is slow?", and would make the timeout budget enforceable
-against agent time rather than against infrastructure.
-
----
-
-## 10. Known limitations
-
-Honest list, because these are the things a reviewer will find.
-
-- **Jobs are designed to run one at a time.** Starting a job sweeps orphaned rollout
-  containers, which would also remove a concurrently running job's gyms; the console confirms
-  before starting a new job while one is running. Scoping the sweep per job is the real fix.
-- **The running-job registry is in memory.** Restarting the API abandons in-flight jobs.
-  Artifacts and `job.json` survive and `--resume` recovers them, but the abandoned job keeps
-  reporting `RUNNING` until it is resumed — there is no read-side reconciliation, and no
-  Resume button in the console. This is deliberately left to the production design rather than
-  faked locally.
-- **The timeout path has never fired.** Zero `TIMED_OUT` across 121 recorded rollouts, and no
-  test drives the SIGKILL path. There is also a known latent mislabel: the agent checks its
-  deadline only *between* steps, and the vendored model call retries 5x with exponential
-  backoff, which can exceed the parent's 45 s shutdown grace — so a stalled API call near the
-  deadline would be recorded as `TIMED_OUT` (reward 0) when the honest classification is
-  `NOT_OBSERVED` (reward null).
-- **Concurrency is capped at 3** by VM memory. Correct for this machine; not a general limit.
-- **Rank order is not graded.** List comparison is order-insensitive, so a "top 3" task passes
-  on any permutation of the correct three pairs. Pairing *is* enforced; ordering is not.
-- **`temperature = 1.0`** by default, because pass@k wants sampling diversity — which means a
-  run is not reproducible. The trajectory is the record, which is why `evaluator_version` and
-  stored artifacts matter more here than reproducibility would.
-- **Safety confirmations are auto-acknowledged.** Unattended rollouts cannot block on a human.
-  Recorded per step and counted per rollout, because auto-approving a safety check is a policy
-  choice and not an implementation detail to bury.
+- **In-memory job registry** — restarting the API abandons in-flight jobs. Artifacts survive and
+  `--resume` recovers them, but the abandoned job keeps reporting `RUNNING`.
+- **The timeout path has never fired**, and the wall clock is kept deliberately loose because of
+  it: `TIMED_OUT` scores 0, so a tight clock would book our own slowness as agent failure. The
+  budget actually being scored is `max_steps`. Residual risk: the deadline is checked only
+  *between* steps and the vendored model call retries with backoff, so a stalled call near the
+  deadline could still be recorded as `TIMED_OUT` rather than `NOT_OBSERVED`.
+- **Rank order is not graded.** A "top 3" task passes on any permutation of the correct pairs.
+  Pairing is enforced; ordering is not.
+- **`temperature = 1.0`**, because pass@k wants sampling diversity — so a run is not reproducible.
+  The trajectory is the record, which is why `evaluator_version` and stored artifacts matter more
+  here than reproducibility would.

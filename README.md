@@ -224,7 +224,7 @@ agent/.venv/bin/python -m rlgym.gym_stack --port 3000 --keep     # Ctrl-C tears 
 
 ### What a run costs
 
-A rollout averages **~285 s** and **~500k tokens** (prompt:output ≈ 500:1 — screenshots
+A rollout averages **~285 s** and **~450k tokens** (prompt:output ≈ 380:1 — screenshots
 dominate completely). Budget accordingly:
 
 | Job | Rollouts | Wall clock @ concurrency 3 | Tokens |
