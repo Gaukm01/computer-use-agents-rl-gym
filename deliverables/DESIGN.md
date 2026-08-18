@@ -87,6 +87,8 @@ is a machine-count problem, which is where [`PRODUCTION.md`](./PRODUCTION.md) pi
 
 ## 3.1 Job submitted → queued and scheduled
 
+![Request to scheduled rollouts](images/hld_request_to_scheduled_rollouts.png)
+
 ### 3.1.1 Validation and the job document
 
 `service.submit_job()` → `rlgym/service.py:287`
@@ -146,6 +148,8 @@ block inside `ports.claim()`.
 
 ### 3.1.7 Tracking rollouts via `artifact.json`
 
+![Rollout artifact as source of truth](images/state_artifact_source_of_truth.png)
+
 Two writers, and the split is the whole progress mechanism:
 
 | Path | Source | When |
@@ -163,6 +167,10 @@ uses the value in hand so a successful rollout cannot vanish over an I/O error.
 
 `execute_attempt()` → `rlgym/executor.py:334`. Phases: `QUEUED → PROVISIONING →
 AUTHENTICATING → CONNECTING → RUNNING → GRADING → DONE`.
+
+![One rollout: parent / child pipeline](images/one_rollout_parent_child_pipeline.png)
+
+![Rollout phase state machine](images/rollout_phase_state_machine.png)
 
 ### 3.2.1 Subprocess isolation
 
@@ -223,6 +231,8 @@ presented as a valid run.
   not that a file exists. A stale session is infrastructure failure, not agent failure.
 
 ### 3.2.4 Agent hookup
+
+![Agent hookup and the act / observe loop](images/agent_hookup_act_observe_loop.png)
 
 #### Browser — `GymComputer.__enter__` → `rlgym/computer.py:101`
 
@@ -291,6 +301,8 @@ while len(steps) < max_steps:
 `TIMEOUT` · `API_ERROR` · `HARNESS_ERROR` · `SAFETY_BLOCKED`.
 
 ### 3.2.5 Grading layer
+
+![Stop reason to status to reward](images/stop_reason_to_status_to_reward.png)
 
 `grade_attempt()` → `rlgym/executor.py:510` · `grader.grade()` → `rlgym/grader.py:277`
 
